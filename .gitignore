@@ -9,3 +9,5 @@ ios
 data/*.sqlite
 data/*.sqlite-*
 can-i-eat-it-backend-export.json
+
+.vercel
