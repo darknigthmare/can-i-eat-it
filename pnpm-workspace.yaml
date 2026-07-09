@@ -1,0 +1,9 @@
+allowBuilds:
+  better-sqlite3: false
+  esbuild: true
+  tesseract.js: true
+ignoredBuiltDependencies:
+  - better-sqlite3
+onlyBuiltDependencies:
+  - esbuild
+  - tesseract.js

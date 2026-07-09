@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Can I Eat It",
+  "version": "1.2.0",
+  "identifier": "com.darknigthmare.canieatit",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Can I Eat It",
+        "width": 1280,
+        "height": 900,
+        "minWidth": 980,
+        "minHeight": 680,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "HealthAndFitness",
+    "shortDescription": "Menu scanner for dietary compatibility",
+    "longDescription": "Can I Eat It V12 scans and OCRs menus, translates foreign menu terms offline for dietary analysis, checks dishes against profiles, learns corrections, syncs anonymized community data, and includes restaurant intelligence, safe order mode, moderation, and a multilingual server assistant."
+  }
+}

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Can I Eat It icon">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#74f7b0"/>
+      <stop offset="1" stop-color="#20b26b"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="108" fill="#07110d"/>
+  <circle cx="256" cy="256" r="172" fill="url(#g)" opacity=".18"/>
+  <path d="M155 174c0-31 25-56 56-56h90c31 0 56 25 56 56v164c0 31-25 56-56 56h-90c-31 0-56-25-56-56V174Z" fill="#0f2119" stroke="#74f7b0" stroke-width="20"/>
+  <path d="M195 181h122M195 226h122M195 271h80" stroke="#dfffee" stroke-width="22" stroke-linecap="round"/>
+  <path d="M214 341l32 32 66-82" fill="none" stroke="#74f7b0" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

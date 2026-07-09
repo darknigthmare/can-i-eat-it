@@ -1,0 +1,17 @@
+{
+  "name": "Can I Eat It",
+  "short_name": "CanIEatIt",
+  "description": "Scanner, traduire et analyser des menus selon profils alimentaires, religieux et santé.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#07110d",
+  "theme_color": "#07110d",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
