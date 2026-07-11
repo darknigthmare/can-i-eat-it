@@ -128,6 +128,16 @@ let serverAssistantUrgency: ServerAssistantUrgency = 'standard';
 let serverAnswers: ServerAnswerMap = {};
 let serverAssistantStatus = '';
 
+type AppView = 'scanner' | 'results' | 'restaurants' | 'community' | 'profile';
+
+const APP_VIEWS: { id: AppView; label: string; title: string; description: string }[] = [
+  { id: 'scanner', label: 'Scanner', title: 'Scanner un menu', description: 'Prends une photo ou colle le texte du menu, puis lance l’analyse.' },
+  { id: 'results', label: 'Résultats', title: 'Choisir sans hésiter', description: 'Retrouve les plats compatibles, les risques et les questions à poser.' },
+  { id: 'restaurants', label: 'Restaurants', title: 'Mes restaurants', description: 'Mémorise les bonnes adresses et retrouve les menus déjà analysés.' },
+  { id: 'community', label: 'Communauté', title: 'Base communautaire', description: 'Partage des corrections anonymisées et améliore la qualité des données.' },
+  { id: 'profile', label: 'Profil', title: 'Mon profil alimentaire', description: 'Gère tes règles, allergies, préférences, historique et corrections.' },
+];
+
 registerServiceWorker();
 
 function escapeHtml(value: string): string {
@@ -144,181 +154,344 @@ function render() {
   const displayedResults = filterResults(settings.riskFirst ? sortResultsByRisk(results) : results);
   const displayedGroupRows = filterGroupRows(settings.riskFirst ? sortGroupRowsByRisk(groupRows) : groupRows);
   const stats = settings.mode === 'group' ? buildGroupStats(displayedGroupRows) : buildStats(displayedResults);
+  const view = getAppView();
+  const viewMeta = APP_VIEWS.find((item) => item.id === view) ?? APP_VIEWS[0];
 
   app.innerHTML = `
-    <div class="shell">
-      <header class="hero">
-        <div>
-          <p class="eyebrow">Can I Eat It · V12 traduction menu</p>
-          <h1>Scanner un menu, savoir vite ce que chacun peut manger.</h1>
-          <p class="hero__copy">OCR photo avancé, traduction de menus étrangers, profils alimentaires/religieux/santé, restaurant intelligent, base communautaire, commande sûre et assistant serveur multilingue.</p>
-        </div>
-        <div class="hero__panel">
-          <div class="score score--safe"><strong>${stats.safe}</strong><span>${settings.mode === 'group' ? 'plats avec au moins 1 OK' : 'OK'}</span></div>
-          <div class="score score--caution"><strong>${stats.caution}</strong><span>À vérifier</span></div>
-          <div class="score score--blocked"><strong>${stats.blocked}</strong><span>Bloqués</span></div>
-          <div class="score score--unknown"><strong>${stats.unknown}</strong><span>Inconnus</span></div>
-        </div>
-        <div class="backend-strip">
-          <span class="backend-dot ${backendHealth?.ok ? 'backend-dot--online' : 'backend-dot--offline'}"></span>
-          <strong>${escapeHtml(backendStatus)}</strong>
-          <small>${escapeHtml(getBackendBaseUrl())}</small>
-        </div>
+    <div class="app-shell">
+      <header class="app-header">
+        <a class="brand" href="#/scanner" aria-label="Can I Eat It, scanner un menu">
+          <span class="brand__mark">CIEI</span>
+          <span><strong>Can I Eat It</strong><small>Décider simplement</small></span>
+        </a>
+        <nav class="desktop-nav" aria-label="Navigation principale">
+          ${renderNavigation(view)}
+        </nav>
+        <a class="profile-shortcut" href="#/profile" aria-label="Ouvrir le profil ${escapeHtml(activeProfile.name)}">
+          <span class="profile-shortcut__avatar">${escapeHtml(profileInitial(activeProfile))}</span>
+          <span><small>Profil actif</small><strong>${escapeHtml(activeProfile.name)}</strong></span>
+        </a>
       </header>
 
-      <main class="grid">
-        <section class="card scanner-card">
-          <div class="card__header">
-            <div>
-              <p class="eyebrow">1 · Scanner</p>
-              <h2>Photo, OCR ou texte manuel</h2>
-            </div>
-            <span class="pill">${sourceLabel(activeSource)}</span>
+      <main class="screen-shell" id="main-content">
+        <header class="screen-heading">
+          <div>
+            <p class="eyebrow">${escapeHtml(viewMeta.label)}</p>
+            <h1>${escapeHtml(viewMeta.title)}</h1>
+            <p>${escapeHtml(viewMeta.description)}</p>
           </div>
-
-          <div class="sample-row">
-            ${SAMPLE_MENUS.map((sample) => `<button class="chip" data-action="sample" data-sample-id="${sample.id}">${escapeHtml(sample.name)}</button>`).join('')}
+          <div class="screen-status" title="${escapeHtml(backendStatus)}">
+            <span class="backend-dot ${backendHealth?.ok ? 'backend-dot--online' : 'backend-dot--offline'}"></span>
+            <span>${backendHealth?.ok ? 'Synchronisé' : 'Mode local'}</span>
           </div>
+        </header>
 
-          <label class="drop-zone">
-            <input id="imageInput" type="file" accept="image/*" capture="environment" />
-            <span class="drop-zone__icon">📸</span>
-            <strong>Importer/prendre une photo du menu</strong>
-            <small>${selectedImageName ? escapeHtml(selectedImageName) : 'Mobile : ouvre la caméra. PC : sélectionne une image.'}</small>
-          </label>
+        ${renderActiveView(view, activeProfile, displayedResults, displayedGroupRows, stats)}
+      </main>
 
-          <div class="actions">
-            <button class="ghost" data-action="capture-camera">Caméra mobile native</button>
-            <button class="primary" data-action="run-ocr" ${selectedImageFile ? '' : 'disabled'}>Lire la photo avec OCR</button>
-            <span class="status-line">${escapeHtml(ocrStatus)}</span>
+      <nav class="mobile-nav" aria-label="Navigation mobile">
+        ${renderNavigation(view, true)}
+      </nav>
+      ${learningDraft ? renderLearningModal(learningDraft) : ''}
+    </div>
+  `;
+}
+
+function getAppView(): AppView {
+  const requested = window.location.hash.replace(/^#\/?/, '').split('/')[0] as AppView;
+  return APP_VIEWS.some((item) => item.id === requested) ? requested : 'scanner';
+}
+
+function navigateToView(view: AppView): void {
+  const nextHash = `#/${view}`;
+  if (window.location.hash === nextHash) {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    render();
+    return;
+  }
+  window.location.hash = nextHash;
+}
+
+function renderNavigation(activeView: AppView, compact = false): string {
+  return APP_VIEWS.map((item) => `
+    <a href="#/${item.id}" class="nav-link ${item.id === activeView ? 'nav-link--active' : ''}" ${item.id === activeView ? 'aria-current="page"' : ''}>
+      <span>${escapeHtml(compact && item.id === 'community' ? 'Base' : item.label)}</span>
+      ${item.id === 'results' && currentRecord ? '<em>1</em>' : ''}
+    </a>
+  `).join('');
+}
+
+function profileInitial(profile: UserProfile): string {
+  return profile.name.trim().charAt(0).toUpperCase() || 'P';
+}
+
+function renderActiveView(
+  view: AppView,
+  activeProfile: UserProfile,
+  displayedResults: AnalysisResult[],
+  displayedGroupRows: GroupAnalysisRow[],
+  stats: ReturnType<typeof buildStats>,
+): string {
+  if (view === 'results') return renderResultsScreen(displayedResults, displayedGroupRows, stats);
+  if (view === 'restaurants') return `<div class="screen-stack">${renderRestaurantCockpit()}</div>`;
+  if (view === 'community') return renderCommunityScreen();
+  if (view === 'profile') return renderProfileScreen(activeProfile);
+  return renderScannerScreen(activeProfile);
+}
+
+function renderScannerScreen(activeProfile: UserProfile): string {
+  const profileRules = activeProfile.rules.map((rule) => RULE_LABELS[rule]);
+  const profileAlerts = activeProfile.allergens.map((allergen) => EU_MAJOR_ALLERGENS.find((item) => item.id === allergen)?.label).filter(Boolean) as string[];
+  const profileTags = [...profileRules, ...profileAlerts].slice(0, 5);
+
+  return `
+    <div class="scan-layout">
+      <section class="card scanner-card scanner-card--focused">
+        <div class="card__header">
+          <div>
+            <p class="eyebrow">Étape 1 sur 2</p>
+            <h2>Ajouter le menu</h2>
           </div>
+          <span class="pill">${sourceLabel(activeSource)}</span>
+        </div>
 
-          ${imagePreview ? `<div class="image-preview"><img src="${imagePreview}" alt="Photo du menu importée" /></div>` : ''}
+        <label class="drop-zone drop-zone--primary">
+          <input id="imageInput" type="file" accept="image/*" capture="environment" />
+          <strong>Prendre ou importer une photo</strong>
+          <small>${selectedImageName ? escapeHtml(selectedImageName) : 'Le texte du menu sera extrait automatiquement.'}</small>
+        </label>
 
-          <label class="field">
-            <span>Texte du menu détecté / corrigé</span>
-            <textarea id="menuText" rows="12" spellcheck="false">${escapeHtml(menuText)}</textarea>
-          </label>
+        <div class="actions scan-photo-actions">
+          <button class="ghost" data-action="capture-camera">Ouvrir la caméra</button>
+          <button class="ghost" data-action="run-ocr" ${selectedImageFile ? '' : 'disabled'}>Extraire le texte</button>
+          <span class="status-line">${escapeHtml(ocrStatus)}</span>
+        </div>
 
-          <div class="actions actions--split">
-            <button class="primary primary--large" data-action="analyze">Analyser le menu</button>
-            <label class="toggle">
-              <input id="riskFirst" type="checkbox" ${settings.riskFirst ? 'checked' : ''} />
-              Trier par risque
-            </label>
+        ${imagePreview ? `<div class="image-preview"><img src="${imagePreview}" alt="Photo du menu importée" /></div>` : ''}
+
+        <label class="field menu-field">
+          <span>Texte du menu</span>
+          <textarea id="menuText" rows="12" spellcheck="false" placeholder="Colle ici le texte du menu…">${escapeHtml(menuText)}</textarea>
+        </label>
+
+        <div class="scan-submit">
+          <div>
+            <strong>Prêt à vérifier ce menu ?</strong>
+            <span>L’analyse utilise le profil ${escapeHtml(activeProfile.name)}.</span>
           </div>
-        </section>
+          <button class="primary primary--large" data-action="analyze">Analyser le menu</button>
+        </div>
+      </section>
 
-        <section class="card profile-card">
-          <div class="card__header">
-            <div>
-              <p class="eyebrow">2 · Profil</p>
-              <h2>Règles utilisateur</h2>
-            </div>
-            <button class="ghost" data-action="reset-profiles">Reset profils</button>
+      <aside class="scan-sidebar">
+        <section class="card active-profile-card">
+          <div class="active-profile-card__top">
+            <span class="profile-shortcut__avatar">${escapeHtml(profileInitial(activeProfile))}</span>
+            <div><small>Analyse avec</small><strong>${escapeHtml(activeProfile.name)}</strong></div>
           </div>
-
           <div class="segmented" role="tablist" aria-label="Mode d'analyse">
             <button class="segment ${settings.mode === 'single' ? 'segment--active' : ''}" data-action="set-mode" data-mode="single">Solo</button>
             <button class="segment ${settings.mode === 'group' ? 'segment--active' : ''}" data-action="set-mode" data-mode="group">Groupe</button>
           </div>
-
-          <label class="field">
-            <span>Profil actif à modifier</span>
-            <select id="activeProfileId">
-              ${profiles.map((item) => `<option value="${escapeHtml(item.id ?? '')}" ${item.id === activeProfile.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}
-            </select>
-          </label>
-
-          <div class="actions">
-            <button class="ghost" data-action="duplicate-profile">Dupliquer profil</button>
-            <button class="ghost" data-action="delete-profile" ${profiles.length <= 1 ? 'disabled' : ''}>Supprimer profil</button>
-          </div>
-
-          ${settings.mode === 'group' ? renderGroupProfilePicker() : ''}
-
-          ${renderProfileEditor(activeProfile)}
+          ${settings.mode === 'group' ? renderGroupProfilePicker() : `
+            <div class="profile-tag-list">
+              ${profileTags.length ? profileTags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join('') : '<span>Aucune règle active</span>'}
+            </div>
+          `}
+          <a class="secondary-link" href="#/profile">Modifier mon profil</a>
         </section>
-      </main>
 
-      ${renderAdvancedOcrPanel()}
-
-      ${renderMenuTranslationPanel()}
-
-      ${renderRestaurantCockpit()}
-
-      ${renderSafeOrderMode()}
-
-      ${renderServerAssistantPanel()}
-
-      ${renderCommunityPanel()}
-
-      ${renderModerationPanel()}
-
-      <section class="card results-card">
-        <div class="card__header card__header--wrap">
-          <div>
-            <p class="eyebrow">3 · Résultat</p>
-            <h2>${settings.mode === 'group' ? `${displayedGroupRows.length} plat(s) / ${getEnabledProfiles().length} profil(s)` : `${displayedResults.length} plat(s) analysé(s)`}</h2>
+        <section class="card sample-card">
+          <div class="card__header card__header--compact">
+            <div><p class="eyebrow">Essayer rapidement</p><h2>Menus exemples</h2></div>
           </div>
-          <div class="toolbar">
-            <select id="statusFilter" aria-label="Filtrer par statut">
-              ${renderStatusOptions(settings.statusFilter)}
-            </select>
-            <input id="resultSearch" type="search" value="${escapeHtml(settings.resultSearch)}" placeholder="Rechercher un plat/raison…" />
-            <button class="ghost" data-action="copy-question-sheet" ${currentRecord ? '' : 'disabled'}>Copier questions</button>
-            <button class="ghost" data-action="export-json" ${currentRecord ? '' : 'disabled'}>Exporter JSON</button>
-            <button class="ghost" data-action="clear-results" ${(results.length || groupRows.length) ? '' : 'disabled'}>Vider</button>
+          <div class="sample-list">
+            ${SAMPLE_MENUS.map((sample) => `<button class="sample-button" data-action="sample" data-sample-id="${sample.id}"><span>${escapeHtml(sample.name)}</span><small>Charger cet exemple</small></button>`).join('')}
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <section class="scan-tools" aria-label="Outils de lecture du menu">
+      <details class="tool-drawer">
+        <summary><span><strong>Outils OCR avancés</strong><small>Nettoyer une photo difficile ou isoler une zone douteuse.</small></span><em>Ouvrir</em></summary>
+        ${renderAdvancedOcrPanel()}
+      </details>
+      <details class="tool-drawer">
+        <summary><span><strong>Traduire un menu étranger</strong><small>Détecter la langue et enrichir les ingrédients avant l’analyse.</small></span><em>Ouvrir</em></summary>
+        ${renderMenuTranslationPanel()}
+      </details>
+    </section>
+  `;
+}
+
+function renderResultsScreen(displayedResults: AnalysisResult[], displayedGroupRows: GroupAnalysisRow[], stats: ReturnType<typeof buildStats>): string {
+  if (!currentRecord) {
+    return `
+      <section class="card empty-screen">
+        <p class="eyebrow">Aucune analyse en cours</p>
+        <h2>Commence par scanner un menu</h2>
+        <p>Les plats compatibles, les alertes et les questions à poser apparaîtront ici.</p>
+        <a class="primary primary-link" href="#/scanner">Scanner un menu</a>
+      </section>
+    `;
+  }
+
+  const activeTab = getResultsTab();
+
+  return `
+    <section class="result-summary" aria-label="Résumé de l'analyse">
+      <div class="score score--safe"><strong>${stats.safe}</strong><span>Compatibles</span></div>
+      <div class="score score--caution"><strong>${stats.caution}</strong><span>À vérifier</span></div>
+      <div class="score score--blocked"><strong>${stats.blocked}</strong><span>À éviter</span></div>
+      <div class="score score--unknown"><strong>${stats.unknown}</strong><span>Inconnus</span></div>
+    </section>
+    <nav class="section-tabs" aria-label="Vues des résultats">
+      <a href="#/results/summary" class="section-tab ${activeTab === 'summary' ? 'section-tab--active' : ''}" ${activeTab === 'summary' ? 'aria-current="page"' : ''}>Résumé</a>
+      <a href="#/results/dishes" class="section-tab ${activeTab === 'dishes' ? 'section-tab--active' : ''}" ${activeTab === 'dishes' ? 'aria-current="page"' : ''}>Tous les plats</a>
+      <a href="#/results/assistant" class="section-tab ${activeTab === 'assistant' ? 'section-tab--active' : ''}" ${activeTab === 'assistant' ? 'aria-current="page"' : ''}>Assistant serveur</a>
+    </nav>
+    <div class="screen-stack result-tab-panel">
+      ${activeTab === 'dishes'
+        ? renderResultsPanel(displayedResults, displayedGroupRows)
+        : activeTab === 'assistant'
+          ? renderServerAssistantPanel()
+          : renderSafeOrderMode()}
+    </div>
+  `;
+}
+
+function getResultsTab(): 'summary' | 'dishes' | 'assistant' {
+  const tab = window.location.hash.replace(/^#\/?/, '').split('/')[1];
+  return tab === 'dishes' || tab === 'assistant' ? tab : 'summary';
+}
+
+function renderResultsPanel(displayedResults: AnalysisResult[], displayedGroupRows: GroupAnalysisRow[]): string {
+  return `
+    <section class="card results-card">
+      <div class="card__header card__header--wrap">
+        <div>
+          <p class="eyebrow">Analyse détaillée</p>
+          <h2>${settings.mode === 'group' ? `${displayedGroupRows.length} plat(s) · ${getEnabledProfiles().length} profil(s)` : `${displayedResults.length} plat(s) analysé(s)`}</h2>
+        </div>
+        <div class="toolbar">
+          <select id="statusFilter" aria-label="Filtrer par statut">${renderStatusOptions(settings.statusFilter)}</select>
+          <input id="resultSearch" type="search" value="${escapeHtml(settings.resultSearch)}" placeholder="Rechercher un plat…" />
+          <button class="ghost" data-action="copy-question-sheet">Copier les questions</button>
+          <button class="ghost" data-action="export-json">Exporter</button>
+          <button class="ghost" data-action="clear-results">Vider</button>
+        </div>
+      </div>
+      ${settings.mode === 'group'
+        ? (displayedGroupRows.length ? `<div class="group-list">${displayedGroupRows.map(renderGroupRowCard).join('')}</div>` : renderEmptyResults())
+        : (displayedResults.length ? `<div class="result-list">${displayedResults.map(renderResultCard).join('')}</div>` : renderEmptyResults())}
+    </section>
+  `;
+}
+
+function renderProfileScreen(activeProfile: UserProfile): string {
+  const restrictionCount = activeProfile.rules.length + activeProfile.allergens.length + activeProfile.intolerances.length;
+  return `
+    <div class="profile-layout">
+      <section class="card profile-card profile-editor-card">
+        <div class="card__header card__header--wrap">
+          <div><p class="eyebrow">Identité alimentaire</p><h2>Règles du profil</h2></div>
+          <div class="actions">
+            <button class="ghost" data-action="duplicate-profile">Dupliquer</button>
+            <button class="ghost" data-action="delete-profile" ${profiles.length <= 1 ? 'disabled' : ''}>Supprimer</button>
           </div>
         </div>
 
-        ${settings.mode === 'group'
-          ? (displayedGroupRows.length ? `<div class="group-list">${displayedGroupRows.map(renderGroupRowCard).join('')}</div>` : renderEmptyResults())
-          : (displayedResults.length ? `<div class="result-list">${displayedResults.map(renderResultCard).join('')}</div>` : renderEmptyResults())}
+        <label class="field">
+          <span>Profil à modifier</span>
+          <select id="activeProfileId">
+            ${profiles.map((item) => `<option value="${escapeHtml(item.id ?? '')}" ${item.id === activeProfile.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}
+          </select>
+        </label>
+        ${renderProfileEditor(activeProfile)}
       </section>
 
-      <section class="bottom-grid">
-        <article class="card">
-          <div class="card__header">
-            <div>
-              <p class="eyebrow">Base locale</p>
-              <h2>${INGREDIENTS.length} ingrédients/tags · ${profiles.length} profils</h2>
-            </div>
+      <aside class="profile-aside">
+        <section class="card profile-overview">
+          <div class="profile-overview__identity">
+            <span class="profile-overview__avatar">${escapeHtml(profileInitial(activeProfile))}</span>
+            <div><p class="eyebrow">Profil actif</p><h2>${escapeHtml(activeProfile.name)}</h2></div>
           </div>
-          <p class="muted">La V12 reconnaît et traduit les familles critiques : porc, alcool, viande non certifiée, lactose/lait, œuf, gluten, fruits de mer, arachide, soja, sésame, moutarde, céleri, sulfites, gélatine, bouillon, sauces cachées et friture partagée.</p>
-          <div class="tag-cloud">
-            ${INGREDIENTS.slice(0, 36).map((ingredient) => `<span>${escapeHtml(ingredient.names[0])}</span>`).join('')}
+          <div class="profile-overview__stats">
+            <div><strong>${restrictionCount}</strong><span>règles actives</span></div>
+            <div><strong>${activeProfile.strictness === 'strict' ? 'Strict' : activeProfile.strictness === 'relaxed' ? 'Souple' : 'Normal'}</strong><span>prudence</span></div>
+            <div><strong>${history.length}</strong><span>scans enregistrés</span></div>
           </div>
-        </article>
+        </section>
 
-        <article class="card history-card">
-          <div class="card__header">
-            <div>
-              <p class="eyebrow">Historique local</p>
-              <h2>${history.length} scan(s)</h2>
-            </div>
-            <button class="ghost" data-action="clear-history" ${history.length ? '' : 'disabled'}>Effacer</button>
+        <section class="card analysis-mode-card">
+          <p class="eyebrow">Mode d’analyse</p>
+          <h2>Solo ou groupe</h2>
+          <div class="segmented" role="tablist" aria-label="Mode d'analyse">
+            <button class="segment ${settings.mode === 'single' ? 'segment--active' : ''}" data-action="set-mode" data-mode="single">Solo</button>
+            <button class="segment ${settings.mode === 'group' ? 'segment--active' : ''}" data-action="set-mode" data-mode="group">Groupe</button>
           </div>
-          ${history.length ? `<div class="history-list">${history.slice(0, 10).map(renderHistoryItem).join('')}</div>` : '<p class="muted">Les analyses sont stockées localement dans le navigateur/app. Si le backend SQLite est lancé, elles sont aussi envoyées au serveur local.</p>'}
-        </article>
+          ${settings.mode === 'group' ? renderGroupProfilePicker() : '<p class="muted">Le prochain scan utilisera uniquement le profil actif.</p>'}
+        </section>
 
-        <article class="card memory-card">
-          <div class="card__header">
-            <div>
-              <p class="eyebrow">Mémoire apprise</p>
-              <h2>${learnedDishes.length} correction(s)</h2>
-            </div>
-            <div class="actions">
-              <button class="ghost" data-action="refresh-backend">Tester backend</button>
-              <button class="ghost" data-action="sync-backend">Sync SQLite</button>
-            </div>
-          </div>
-          <p class="muted">Les corrections “Corriger / apprendre” passent avant la base générique : utile pour les restaurants récurrents, les sauces maison et les plats mal reconnus par OCR. En V12, elles peuvent être liées à une enseigne et partagées anonymement dans la base communautaire.</p>
-          ${syncStatus ? `<p class="sync-status">${escapeHtml(syncStatus)}</p>` : ''}
-          ${learnedDishes.length ? `<div class="memory-list">${learnedDishes.slice(0, 12).map(renderLearnedDishItem).join('')}</div>` : '<p class="muted">Aucune correction apprise. Analyse un plat puis clique sur “Corriger / apprendre”.</p>'}
-        </article>
+        <section class="card privacy-card">
+          <p class="eyebrow">Confidentialité</p>
+          <h2>Tes données restent privées</h2>
+          <p class="muted">Les profils, allergies et historiques restent dans ton navigateur. Seules les corrections anonymisées peuvent être partagées.</p>
+          <button class="ghost" data-action="reset-profiles">Réinitialiser les profils</button>
+        </section>
+      </aside>
+    </div>
+
+    <section class="profile-data-grid">
+      ${renderHistoryCard()}
+      ${renderMemoryCard()}
+    </section>
+  `;
+}
+
+function renderHistoryCard(): string {
+  return `
+    <article class="card history-card">
+      <div class="card__header">
+        <div><p class="eyebrow">Historique</p><h2>${history.length} scan(s)</h2></div>
+        <button class="ghost" data-action="clear-history" ${history.length ? '' : 'disabled'}>Effacer</button>
+      </div>
+      ${history.length ? `<div class="history-list">${history.slice(0, 12).map(renderHistoryItem).join('')}</div>` : '<p class="muted">Tes prochaines analyses apparaîtront ici pour être consultées à nouveau.</p>'}
+    </article>
+  `;
+}
+
+function renderMemoryCard(): string {
+  return `
+    <article class="card memory-card">
+      <div class="card__header card__header--wrap">
+        <div><p class="eyebrow">Mémoire personnelle</p><h2>${learnedDishes.length} correction(s)</h2></div>
+        <div class="actions">
+          <button class="ghost" data-action="refresh-backend">Tester la synchro</button>
+          <button class="ghost" data-action="sync-backend">Synchroniser</button>
+        </div>
+      </div>
+      <p class="muted">Les corrections apprises passent avant les estimations générales pour tes prochains scans.</p>
+      ${syncStatus ? `<p class="sync-status">${escapeHtml(syncStatus)}</p>` : ''}
+      ${learnedDishes.length ? `<div class="memory-list">${learnedDishes.slice(0, 12).map(renderLearnedDishItem).join('')}</div>` : '<p class="muted">Aucune correction apprise pour le moment.</p>'}
+    </article>
+  `;
+}
+
+function renderCommunityScreen(): string {
+  return `
+    <div class="screen-stack">
+      <section class="card knowledge-card">
+        <div class="card__header"><div><p class="eyebrow">Moteur local</p><h2>${INGREDIENTS.length} ingrédients et risques reconnus</h2></div></div>
+        <p class="muted">Porc, alcool, lactose, gluten, fruits de mer, allergènes, gélatine, bouillons, sauces cachées et contamination croisée.</p>
+        <div class="tag-cloud">${INGREDIENTS.slice(0, 24).map((ingredient) => `<span>${escapeHtml(ingredient.names[0])}</span>`).join('')}</div>
       </section>
-      ${learningDraft ? renderLearningModal(learningDraft) : ''}
+      ${renderCommunityPanel()}
+      <details class="tool-drawer moderation-drawer">
+        <summary><span><strong>Modération et qualité</strong><small>Réservé à la validation des contributions publiques.</small></span><em>Ouvrir</em></summary>
+        ${renderModerationPanel()}
+      </details>
     </div>
   `;
 }
@@ -1802,6 +1975,7 @@ function buildGroupStats(rows: GroupAnalysisRow[]) {
 function syncActiveProfileFromDom() {
   const active = getActiveProfile();
   const nameInput = document.querySelector<HTMLInputElement>('#profileName');
+  if (!nameInput) return;
   const strictnessSelect = document.querySelector<HTMLSelectElement>('#strictness');
   const forbiddenInput = document.querySelector<HTMLInputElement>('#forbiddenTerms');
   const cautionInput = document.querySelector<HTMLInputElement>('#cautionTerms');
@@ -1870,7 +2044,7 @@ function analyzeCurrentMenu(source: ScanRecord['source'] = activeSource) {
     history = loadHistory();
     void persistScanToBackend(currentRecord);
   }
-  render();
+  navigateToView('results');
 }
 
 async function refreshBackendStatus(showRender = true) {
@@ -3392,7 +3566,7 @@ app.addEventListener('click', async (event) => {
       persistSettings();
       saveProfiles(profiles);
     }
-    render();
+    navigateToView('results');
     return;
   }
 
@@ -3621,6 +3795,11 @@ app.addEventListener('input', (event) => {
   if (['profileName', 'forbiddenTerms', 'cautionTerms'].includes(target.id)) {
     syncActiveProfileFromDom();
   }
+});
+
+window.addEventListener('hashchange', () => {
+  window.scrollTo({ top: 0, behavior: 'auto' });
+  render();
 });
 
 render();
