@@ -55,7 +55,7 @@ export function buildSafeOrderPlan(options: SafeOrderPlanOptions): SafeOrderPlan
   const generatedAt = options.createdAt ?? new Date().toISOString();
   const choices = options.mode === 'group'
     ? options.groupRows.map((row) => groupRowToChoice(row, options.enabledProfiles))
-    : options.results.map((result) => resultToChoice(result, options.activeProfile.name));
+    : options.results.map((result) => resultToChoice(result, options.activeProfile));
 
   const bestChoices = choices
     .filter((choice) => choice.action === 'order_as_is')
@@ -164,8 +164,8 @@ export function buildSafeOrderServerScript(plan: SafeOrderPlan): string {
   return lines.join('\n');
 }
 
-function resultToChoice(result: AnalysisResult, profileName: string): SafeOrderChoice {
-  const modifications = collectModificationsFromResults([result]);
+function resultToChoice(result: AnalysisResult, profile: UserProfile): SafeOrderChoice {
+  const modifications = collectModificationsFromResults([result], [profile]);
   const action = actionForSingleResult(result, modifications);
   const blockers = result.reasons
     .filter((reason) => reason.severity === 'danger')
@@ -178,18 +178,18 @@ function resultToChoice(result: AnalysisResult, profileName: string): SafeOrderC
     confidence: result.confidence,
     score: result.score,
     action,
-    audienceLabel: profileName,
+    audienceLabel: profile.name,
     subtitle: subtitleForSingle(result, action),
     reasons: result.reasons.map((reason) => reason.message).slice(0, 6),
     blockers,
     modifications,
     questions: result.askServerQuestions,
-    profileBreakdown: [{ profileName, status: result.status, score: result.score }],
+    profileBreakdown: [{ profileName: profile.name, status: result.status, score: result.score }],
   };
 }
 
 function groupRowToChoice(row: GroupAnalysisRow, profiles: UserProfile[]): SafeOrderChoice {
-  const modifications = collectModificationsFromResults(row.results);
+  const modifications = collectModificationsFromResults(row.results, profiles);
   const action = actionForGroupRow(row, modifications);
   const blockers = unique(row.results
     .flatMap((result) => result.reasons.filter((reason) => reason.severity === 'danger').map((reason) => reason.message)))
@@ -234,11 +234,11 @@ function actionForGroupRow(row: GroupAnalysisRow, modifications: SafeOrderModifi
   return 'ask_first';
 }
 
-function collectModificationsFromResults(results: AnalysisResult[]): SafeOrderModification[] {
-  return mergeModifications(results.flatMap((result) => collectModifications(result)));
+function collectModificationsFromResults(results: AnalysisResult[], profiles: UserProfile[]): SafeOrderModification[] {
+  return mergeModifications(results.flatMap((result, index) => collectModifications(result, profiles[index] ?? profiles[0])));
 }
 
-function collectModifications(result: AnalysisResult): SafeOrderModification[] {
+function collectModifications(result: AnalysisResult, profile?: UserProfile): SafeOrderModification[] {
   const tags = ingredientTags(result.matchedDish.ingredients);
   const reasonText = result.reasons.map((reason) => reason.message).join(' ').toLowerCase();
   const modifications: SafeOrderModification[] = [];
@@ -250,44 +250,47 @@ function collectModifications(result: AnalysisResult): SafeOrderModification[] {
     .map((ingredient) => ingredient.id);
   const has = (tag: IngredientTag) => tags.has(tag);
   const hasAny = (...values: IngredientTag[]) => values.some((tag) => tags.has(tag));
+  const hasRule = (...values: UserProfile['rules']) => values.some((rule) => profile?.rules.includes(rule));
+  const hasSensitivity = (...values: string[]) => values.some((value) => profile?.allergens.includes(value as never) || profile?.intolerances.includes(value as never));
+  const customTerms = [...(profile?.customForbiddenTerms ?? []), ...(profile?.customCautionTerms ?? [])].join(' ').toLowerCase();
 
-  if (hasAny('milk', 'dairy', 'lactose', 'cheese')) {
+  if (hasAny('milk', 'dairy', 'lactose', 'cheese') && (hasRule('vegan', 'low_lactose') || hasSensitivity('milk'))) {
     add('Demander sans fromage, crème, beurre ni sauce lactée.', 'lait/lactose/fromage détecté ou probable', result.status === 'blocked' ? 'required' : 'recommended', idsWithTags('milk', 'dairy', 'lactose', 'cheese'));
   }
-  if (has('pork')) {
+  if (has('pork') && (hasRule('vegetarian', 'vegan', 'no_pork', 'halal', 'kosher') || customTerms.includes('porc'))) {
     add('Retirer jambon, lardons, bacon, chorizo ou dérivé de porc ; éviter si ce n’est pas possible.', 'porc détecté ou probable', 'required', idsWithTags('pork'));
   }
-  if (hasAny('alcohol', 'wine', 'beer', 'rum', 'may_contain_alcohol')) {
+  if (hasAny('alcohol', 'wine', 'beer', 'rum', 'may_contain_alcohol') && (hasRule('no_alcohol', 'halal') || customTerms.includes('alcool'))) {
     add('Demander une version sans vin, bière, alcool flambé, mirin ou sauce alcoolisée.', 'alcool détecté ou possible', 'required', idsWithTags('alcohol', 'wine', 'beer', 'rum', 'may_contain_alcohol'));
   }
-  if (hasAny('gluten', 'fried_shared_oil_risk')) {
+  if (hasAny('gluten', 'fried_shared_oil_risk') && (hasRule('gluten_free') || hasSensitivity('gluten'))) {
     add('Demander une option sans blé/farine/panure et confirmer la friture séparée.', 'gluten ou huile partagée possible', result.status === 'blocked' ? 'required' : 'recommended', idsWithTags('gluten', 'fried_shared_oil_risk'));
   }
-  if (hasAny('meat', 'poultry', 'beef', 'lamb', 'halal_risk') && reasonText.includes('halal')) {
+  if (hasRule('halal') && hasAny('meat', 'poultry', 'beef', 'lamb', 'halal_risk') && reasonText.includes('halal')) {
     add('Demander viande/bouillon/gélatine certifiés halal, ou remplacer par une option végétarienne.', 'certification halal non confirmée', 'required', idsWithTags('meat', 'poultry', 'beef', 'lamb', 'halal_risk'));
   }
-  if (hasAny('gelatin', 'broth_meat_risk', 'animal_fat')) {
+  if (hasAny('gelatin', 'broth_meat_risk', 'animal_fat') && (hasRule('vegetarian', 'vegan', 'halal', 'kosher', 'hindu_no_beef') || customTerms.includes('gélatine') || customTerms.includes('bouillon'))) {
     add('Demander si le bouillon, la gélatine ou la graisse sont végétaux/certifiés.', 'source animale cachée possible', result.status === 'blocked' ? 'required' : 'recommended', idsWithTags('gelatin', 'broth_meat_risk', 'animal_fat'));
   }
-  if (has('hidden_sauce_risk')) {
+  if (has('hidden_sauce_risk') && (reasonText.includes('sauce') || customTerms.includes('sauce'))) {
     add('Demander la sauce à part et la liste exacte des ingrédients.', 'sauce maison ou composition opaque', 'recommended', idsWithTags('hidden_sauce_risk'));
   }
-  if (hasAny('eggs', 'mustard')) {
+  if (hasAny('eggs', 'mustard') && (hasRule('vegan') || hasSensitivity('eggs', 'mustard'))) {
     add('Vérifier mayonnaise, œuf ou moutarde dans la sauce.', 'œuf/moutarde souvent présents dans les sauces', 'recommended', idsWithTags('eggs', 'mustard'));
   }
-  if (hasAny('peanuts', 'nuts', 'sesame', 'soy', 'celery', 'sulphites', 'lupin')) {
+  if (hasAny('peanuts', 'nuts', 'sesame', 'soy', 'celery', 'sulphites', 'lupin') && hasSensitivity('peanuts', 'nuts', 'sesame', 'soy', 'celery', 'sulphites', 'lupin')) {
     add('Confirmer les allergènes et la contamination croisée avant commande.', 'allergènes majeurs détectés/probables', 'required', idsWithTags('peanuts', 'nuts', 'sesame', 'soy', 'celery', 'sulphites', 'lupin'));
   }
-  if (hasAny('crustaceans', 'molluscs', 'shellfish', 'seafood', 'fish')) {
+  if (hasAny('crustaceans', 'molluscs', 'shellfish', 'seafood', 'fish') && (hasRule('vegetarian', 'vegan', 'kosher') || hasSensitivity('fish', 'crustaceans', 'molluscs'))) {
     add('Confirmer poisson/fruits de mer et les ustensiles de préparation séparés.', 'poisson ou fruits de mer détectés/probables', result.status === 'blocked' ? 'required' : 'recommended', idsWithTags('crustaceans', 'molluscs', 'shellfish', 'seafood', 'fish'));
   }
   if (result.status === 'unknown') {
     add('Demander la composition complète du plat avant de commander.', 'composition inconnue', 'required');
   }
-  if (reasonText.includes('présure')) {
+  if (reasonText.includes('présure') && hasRule('vegetarian', 'halal', 'kosher')) {
     add('Demander si le fromage contient de la présure animale.', 'fromage potentiellement non végétarien strict', 'recommended');
   }
-  if (reasonText.includes('contamination croisée') || has('cross_contamination_risk')) {
+  if ((reasonText.includes('contamination croisée') || has('cross_contamination_risk')) && ((profile?.allergens.length ?? 0) > 0 || profile?.strictness === 'strict')) {
     add('Demander une préparation séparée pour limiter la contamination croisée.', 'contamination croisée possible', 'required', idsWithTags('cross_contamination_risk'));
   }
 

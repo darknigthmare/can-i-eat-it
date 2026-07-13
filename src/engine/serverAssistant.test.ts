@@ -57,4 +57,25 @@ describe('serverAssistant', () => {
     expect(summary.riskQuestions.length).toBe(1);
     expect(summary.verdict).toContain('ne commande pas');
   });
+
+  it('consolide les questions répétées par type de risque', () => {
+    const duplicatedPlan: SafeOrderPlan = {
+      ...basePlan,
+      conditionalChoices: [
+        basePlan.conditionalChoices[0],
+        { ...basePlan.conditionalChoices[0], itemId: 'tacos-2', itemName: 'Tacos poulet 2' },
+      ],
+      questions: [
+        'La viande est-elle certifiée halal ?',
+        'La viande est-elle certifiée halal ?',
+        'La sauce contient-elle du lait ?',
+      ],
+    };
+
+    const assistant = buildServerAssistant(duplicatedPlan, { tone: 'polite', language: 'fr', urgency: 'standard' });
+    const categories = assistant.questions.map((question) => question.category);
+
+    expect(assistant.questions.length).toBeLessThanOrEqual(5);
+    expect(new Set(categories).size).toBe(categories.length);
+  });
 });

@@ -1,6 +1,12 @@
 import { dataUrlToFile } from './ocr';
+import { Capacitor } from '@capacitor/core';
+
+export function isNativeCameraAvailable(): boolean {
+  return Capacitor.isNativePlatform();
+}
 
 export async function captureMenuPhoto(): Promise<File | null> {
+  if (!isNativeCameraAvailable()) return null;
   try {
     const module = await import('@capacitor/camera');
     const image = await module.Camera.getPhoto({

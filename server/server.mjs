@@ -2,15 +2,14 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 
 let Database;
 try {
-  ({ default: Database } = await import('better-sqlite3'));
+  ({ DatabaseSync: Database } = await import('node:sqlite'));
 } catch (error) {
-  console.error('\n[Can I Eat It] better-sqlite3 est manquant.');
-  console.error('Lance d’abord : npm install');
-  console.error('Puis relance : npm run server\n');
+  console.error('\n[Can I Eat It] SQLite intégré nécessite Node.js 22 ou plus récent.');
+  console.error('Mets Node.js à jour puis relance : pnpm run server\n');
   console.error(error instanceof Error ? error.message : error);
   process.exit(1);
 }
@@ -19,12 +18,21 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.CIEI_BACKEND_PORT || 4177);
 const HOST = process.env.CIEI_BACKEND_HOST || '127.0.0.1';
+const USER_TOKEN = String(process.env.CIEI_USER_TOKEN || '');
+const ADMIN_TOKEN = String(process.env.CIEI_ADMIN_TOKEN || '');
+const ALLOWED_ORIGINS = new Set(String(process.env.CIEI_ALLOWED_ORIGINS || '').split(',').map((origin) => origin.trim()).filter(Boolean));
+const IS_LOOPBACK_HOST = ['127.0.0.1', 'localhost', '::1'].includes(HOST);
+const AUTH_REQUIRED = !IS_LOOPBACK_HOST || Boolean(USER_TOKEN || ADMIN_TOKEN);
 const dbPath = process.env.CIEI_DB_PATH || path.join(process.cwd(), 'data', 'can-i-eat-it.sqlite');
+
+if (!IS_LOOPBACK_HOST && (!USER_TOKEN || !ADMIN_TOKEN || ALLOWED_ORIGINS.size === 0)) {
+  throw new Error('Exposition réseau refusée : définis CIEI_USER_TOKEN, CIEI_ADMIN_TOKEN et CIEI_ALLOWED_ORIGINS.');
+}
 
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new Database(dbPath);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+db.exec('PRAGMA journal_mode = WAL');
+db.exec('PRAGMA foreign_keys = ON');
 db.exec(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
 ensureColumn('restaurants', 'favorite', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('restaurants', 'visit_count', 'INTEGER NOT NULL DEFAULT 0');
@@ -79,8 +87,8 @@ const statements = {
       last_used_at = excluded.last_used_at
   `),
   listContributions: db.prepare("SELECT * FROM public_contributions WHERE (? = '' OR status = ?) ORDER BY updated_at DESC LIMIT ?"),
-  listPublicContributions: db.prepare("SELECT * FROM public_contributions WHERE status NOT IN ('rejected','deprecated') ORDER BY trust_score DESC, updated_at DESC LIMIT ?"),
-  searchPublicContributions: db.prepare("SELECT * FROM public_contributions WHERE status NOT IN ('rejected','deprecated') AND (normalized_dish_name LIKE @query OR dish_name LIKE @query OR restaurant_name LIKE @query OR restaurant_city LIKE @query) ORDER BY trust_score DESC, updated_at DESC LIMIT @limit"),
+  listPublicContributions: db.prepare("SELECT * FROM public_contributions WHERE status IN ('community_verified','trusted') ORDER BY trust_score DESC, updated_at DESC LIMIT ?"),
+  searchPublicContributions: db.prepare("SELECT * FROM public_contributions WHERE status IN ('community_verified','trusted') AND (normalized_dish_name LIKE @query OR dish_name LIKE @query OR restaurant_name LIKE @query OR restaurant_city LIKE @query) ORDER BY trust_score DESC, updated_at DESC LIMIT @limit"),
   getContribution: db.prepare('SELECT * FROM public_contributions WHERE id = ?'),
   upsertContribution: db.prepare(`
     INSERT INTO public_contributions (id, kind, status, created_at, updated_at, dish_name, normalized_dish_name, aliases_json, restaurant_name, restaurant_city, restaurant_address, ingredient_ids_json, allergen_tags_json, dietary_tags_json, source_type, source_label, evidence_url, notes, trust_score, app_version, contributor_alias, moderation_notes, payload_json)
@@ -116,27 +124,36 @@ const statements = {
 };
 
 const server = http.createServer(async (req, res) => {
-  setCors(res);
+  const url = new URL(req.url || '/', `http://${req.headers.host || `${HOST}:${PORT}`}`);
+  const origin = String(req.headers.origin || '');
+  if (!originIsAllowed(origin)) {
+    sendJson(res, 403, { ok: false, error: 'Origine non autorisée' });
+    return;
+  }
+  setCors(req, res);
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     res.end();
     return;
   }
 
-  const url = new URL(req.url || '/', `http://${req.headers.host || `${HOST}:${PORT}`}`);
-
   try {
     if (req.method === 'GET' && url.pathname === '/health') {
       sendJson(res, 200, {
         ok: true,
         version: '1.2.0',
-        dbPath,
         learnedDishes: Number(statements.healthLearned.get().count),
         scans: Number(statements.healthScans.get().count),
         restaurants: Number(statements.healthRestaurants.get().count),
         contributions: Number(statements.healthContributions.get().count),
         verifiedContributions: Number(statements.healthVerifiedContributions.get().count),
       });
+      return;
+    }
+
+    const requiredAccess = requiredAccessFor(req, url);
+    if (requiredAccess && !requestIsAuthorized(req, requiredAccess)) {
+      sendJson(res, 401, { ok: false, error: 'Authentification requise' });
       return;
     }
 
@@ -228,7 +245,12 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/api/contributions') {
       const body = await readJson(req);
-      const contribution = normalizeContribution({ ...body, status: body?.status === 'queued' ? 'pending_review' : body?.status });
+      const requestedTrustScore = Number(body?.trustScore);
+      const contribution = normalizeContribution({
+        ...body,
+        status: 'pending_review',
+        trustScore: Number.isFinite(requestedTrustScore) ? Math.min(45, requestedTrustScore) : 45,
+      });
       statements.upsertContribution.run(contributionToRow(contribution));
       sendJson(res, 200, { ok: true, item: contribution });
       return;
@@ -572,10 +594,48 @@ function trimOrNull(value) {
   return clean || null;
 }
 
-function setCors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+function originIsAllowed(origin) {
+  if (!origin) return true;
+  if (ALLOWED_ORIGINS.has(origin)) return true;
+  if (!IS_LOOPBACK_HOST) return false;
+  try {
+    return ['127.0.0.1', 'localhost', '::1'].includes(new URL(origin).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function setCors(req, res) {
+  const origin = String(req.headers.origin || '');
+  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+}
+
+function requiredAccessFor(req, url) {
+  if (!url.pathname.startsWith('/api/')) return null;
+  if (req.method === 'GET' && ['/api/public-db', '/api/public-db/search'].includes(url.pathname)) return null;
+  if (req.method === 'PATCH' && url.pathname.startsWith('/api/contributions/')) return 'admin';
+  if (req.method === 'GET' && ['/api/contributions', '/api/export'].includes(url.pathname)) return 'admin';
+  if (req.method === 'DELETE') return 'user';
+  return 'user';
+}
+
+function requestIsAuthorized(req, requiredAccess) {
+  if (!AUTH_REQUIRED) return true;
+  const header = String(req.headers.authorization || '');
+  const provided = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  if (!provided) return false;
+  if (requiredAccess === 'admin') return tokenMatches(provided, ADMIN_TOKEN);
+  return tokenMatches(provided, USER_TOKEN) || tokenMatches(provided, ADMIN_TOKEN);
+}
+
+function tokenMatches(provided, expected) {
+  if (!expected) return false;
+  const providedBuffer = Buffer.from(provided);
+  const expectedBuffer = Buffer.from(expected);
+  return providedBuffer.length === expectedBuffer.length && timingSafeEqual(providedBuffer, expectedBuffer);
 }
 
 function sendJson(res, status, payload) {

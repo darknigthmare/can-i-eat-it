@@ -2,12 +2,16 @@ import type { BackendHealth, LearnedDish, PublicDatabaseExport, PublicDishContri
 
 const DEFAULT_BACKEND_URL = 'http://localhost:4177';
 const metaEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
-const BACKEND_URL = (metaEnv?.VITE_CIEI_BACKEND_URL || DEFAULT_BACKEND_URL).replace(/\/$/, '');
+const CONFIGURED_BACKEND_URL = metaEnv?.VITE_CIEI_BACKEND_URL?.trim();
+const BACKEND_URL = (CONFIGURED_BACKEND_URL || DEFAULT_BACKEND_URL).replace(/\/$/, '');
+const BACKEND_TOKEN = metaEnv?.VITE_CIEI_BACKEND_TOKEN?.trim();
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+const BACKEND_CONFIGURED = Boolean(CONFIGURED_BACKEND_URL) || (typeof window !== 'undefined' && LOCAL_HOSTS.has(window.location.hostname));
 
 type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
-export function getBackendBaseUrl(): string {
-  return BACKEND_URL;
+export function isBackendConfigured(): boolean {
+  return BACKEND_CONFIGURED;
 }
 
 export async function pingBackend(timeoutMs = 1400): Promise<BackendHealth | null> {
@@ -107,13 +111,18 @@ export async function searchPublicDatabase(query: string): Promise<PublicDishCon
 }
 
 async function request<T>(path: string, options: { method?: HttpMethod; body?: unknown; timeoutMs?: number } = {}): Promise<T> {
+  if (!BACKEND_CONFIGURED) throw new Error('Backend non configuré');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 5000);
 
   try {
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (options.body) headers['Content-Type'] = 'application/json';
+    if (BACKEND_TOKEN) headers.Authorization = `Bearer ${BACKEND_TOKEN}`;
+
     const response = await fetch(`${BACKEND_URL}${path}`, {
       method: options.method ?? 'GET',
-      headers: options.body ? { 'Content-Type': 'application/json' } : undefined,
+      headers,
       body: options.body ? JSON.stringify(options.body) : undefined,
       signal: controller.signal,
     });

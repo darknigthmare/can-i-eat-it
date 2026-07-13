@@ -1,5 +1,5 @@
 import type { DecisionStatus, SafeOrderChoice, SafeOrderModification, SafeOrderPlan } from '../types';
-import { normalizeText, unique } from './text';
+import { normalizeText } from './text';
 
 export type ServerAssistantTone = 'polite' | 'short' | 'allergy_urgent' | 'strict_religious';
 export type ServerAssistantLanguage = 'fr' | 'en' | 'es' | 'it' | 'de';
@@ -276,26 +276,26 @@ export function buildServerQuestions(plan: SafeOrderPlan, options: ServerAssista
     rawQuestions.unshift({ text: 'Pouvez-vous confirmer si une version végétarienne/vegan/sans lactose/sans gluten est réellement possible ?', priority: 'high' });
   }
 
-  const deduped = new Map<string, ServerAssistantQuestion>();
+  const deduped = new Map<ServerQuestionCategory, ServerAssistantQuestion>();
   for (const item of rawQuestions) {
     const category = classifyQuestion(item.text);
     const baseText = translateQuestion(item.text, category, options.language);
-    const id = makeQuestionId(category, item.text, item.choice?.itemName);
-    const existing = deduped.get(id);
+    const id = makeQuestionId(category);
+    const existing = deduped.get(category);
     const question: ServerAssistantQuestion = {
       id,
       original: item.text,
       text: baseText,
       category,
       priority: item.priority ?? priorityForCategory(category),
-      relatedChoiceName: item.choice?.itemName,
+      relatedChoiceName: undefined,
     };
-    if (!existing || priorityScore(question.priority) > priorityScore(existing.priority)) deduped.set(id, question);
+    if (!existing || priorityScore(question.priority) > priorityScore(existing.priority)) deduped.set(category, question);
   }
 
   return Array.from(deduped.values())
     .sort((a, b) => priorityScore(b.priority) - priorityScore(a.priority) || CATEGORY_RANK[a.category] - CATEGORY_RANK[b.category] || a.text.localeCompare(b.text, 'fr'))
-    .slice(0, 18);
+    .slice(0, options.urgency === 'standard' ? 5 : 6);
 }
 
 export function summarizeServerAnswers(questions: ServerAssistantQuestion[], answers: ServerAnswerMap): ServerAnswerSummary {
@@ -425,8 +425,8 @@ function priorityScore(priority: ServerAssistantQuestion['priority']): number {
   return priority === 'high' ? 3 : priority === 'medium' ? 2 : 1;
 }
 
-function makeQuestionId(category: ServerQuestionCategory, text: string, choiceName = ''): string {
-  const source = `${category}:${choiceName}:${normalizeText(text)}`;
+function makeQuestionId(category: ServerQuestionCategory): string {
+  const source = category;
   let hash = 0;
   for (let index = 0; index < source.length; index += 1) {
     hash = ((hash << 5) - hash + source.charCodeAt(index)) | 0;

@@ -25,7 +25,7 @@ La V12 ajoute la **traduction de menus étrangers** : l'app détecte/enrichit le
 - Profil utilisateur : végétarien, vegan, pescétarien, sans porc, sans alcool, halal, casher, carême/vendredi sans viande, sans bœuf, faible lactose, sans gluten, règles custom.
 - Allergies et intolérances basées sur les 14 allergènes majeurs européens.
 - Moteur de décision : OK / À vérifier / Non compatible / Inconnu.
-- Score visuel sur 100 pour aider à prioriser.
+- Statuts explicites et niveau de confiance pour prioriser sans présenter une estimation comme une certitude.
 - Questions à poser au restaurant, copiables plat par plat ou en feuille complète.
 - Historique local dans `localStorage`.
 - Export JSON d'une analyse.
@@ -33,15 +33,15 @@ La V12 ajoute la **traduction de menus étrangers** : l'app détecte/enrichit le
 - **Correction guidée** : modale de composition avec recherche, chips, catégories, niveaux de risque et packs rapides.
 - **Édition des plats appris** depuis la mémoire locale.
 - **Badges ingrédients** visibles directement dans les résultats.
-- **Restaurant Intelligence V12** : recherche restaurant par nom/ville/plat/note, favoris, récents, bouton “Je suis ici”, score restaurant et menu connu rechargeable.
+- **Carnet restaurants** : recherche par nom/ville/plat/note, favoris, récents, bouton “Je suis ici” et menu connu rechargeable.
 - **Commande sûre V9/V12** : panneau de décision rapide avec colonnes “à commander”, “possible avec demande” et “à éviter”.
-- **Modifications automatiques** : sans fromage/crème, sans porc, sans alcool, option sans gluten, sauce à part, cuisson séparée, certification halal/casher à confirmer, etc.
+- **Modifications ciblées** : les demandes sans fromage, porc, alcool, gluten ou contamination séparée ne sont proposées que si le profil actif l’exige.
 - **Script serveur copiable V9** : texte poli prêt à lire au restaurant avec questions consolidées.
 - **Plan de commande copiable** : synthèse restaurant + meilleurs choix + modifications + questions + plats à éviter.
 - **Assistant serveur V12** : script multilingue français/anglais/espagnol/italien/allemand, ton poli/court/allergie urgente/règle stricte, priorités allergènes/religieux/végé-santé, lecture vocale navigateur/mobile, réponses cochables et réanalyse après confirmation.
-- **Backend local SQLite optionnel** : restaurants, corrections, scans, contributions publiques.
-- **Community Database V12** : file locale offline, sync backend, téléchargement d'une base publique, import dans mémoire locale, export JSON compatible dépôt GitHub.
-- **Modération & qualité V7/V12** : chargement des contributions, détection problèmes qualité, recommandations de statut, validation/rejet, passage en trusted, obsolescence et fusion de doublons.
+- **Backend local SQLite optionnel et sécurisé** : origine autorisée, jeton utilisateur et jeton administrateur séparés dès que le service est exposé au réseau.
+- **Base communautaire** : file locale, synchronisation uniquement si un service est configuré, import du cache et export JSON.
+- **Modération locale** : validation/rejet et fusion de doublons disponibles uniquement depuis une instance locale reliée au backend.
 - Connecteur Open Food Facts expérimental pour chercher une source produit/ingrédients.
 - PWA basique avec service worker.
 - Structure prête pour EXE Windows/macOS/Linux avec Tauri v2.
@@ -51,8 +51,8 @@ La V12 ajoute la **traduction de menus étrangers** : l'app détecte/enrichit le
 ## Installation web simple
 
 ```bash
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
 Puis ouvrir :
@@ -66,14 +66,14 @@ http://localhost:5173
 Terminal 1 :
 
 ```bash
-npm install
-npm run server
+pnpm install
+pnpm run server
 ```
 
 Terminal 2 :
 
 ```bash
-npm run dev
+pnpm run dev
 ```
 
 Par défaut :
@@ -291,14 +291,14 @@ public-database/
 ## Build web
 
 ```bash
-npm run build
-npm run preview
+pnpm run build
+pnpm run preview
 ```
 
 ## Tests
 
 ```bash
-npm run test
+pnpm run test
 ```
 
 ## Build EXE / desktop avec Tauri
@@ -306,9 +306,9 @@ npm run test
 Prérequis Windows : Rust, Node.js, Microsoft C++ Build Tools, WebView2.
 
 ```bash
-npm install
-npm run tauri:dev
-npm run tauri:build
+pnpm install
+pnpm run tauri:dev
+pnpm run tauri:build
 ```
 
 Le build final sera généré dans `src-tauri/target/release/bundle`.
@@ -316,19 +316,19 @@ Le build final sera généré dans `src-tauri/target/release/bundle`.
 ## Build mobile avec Capacitor
 
 ```bash
-npm install
-npm run build
-npm run mobile:add:android
-npm run mobile:sync
-npm run mobile:open:android
+pnpm install
+pnpm run build
+pnpm run mobile:add:android
+pnpm run mobile:sync
+pnpm run mobile:open:android
 ```
 
 Pour iOS :
 
 ```bash
-npm run mobile:add:ios
-npm run mobile:sync
-npm run mobile:open:ios
+pnpm run mobile:add:ios
+pnpm run mobile:sync
+pnpm run mobile:open:ios
 ```
 
 ## Utiliser Restaurant Intelligence V12

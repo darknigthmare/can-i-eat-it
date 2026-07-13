@@ -53,7 +53,9 @@ function parseLine(line: string, section?: string): MenuItem | null {
 
   const priceMatch = withoutBullets.match(PRICE_REGEX);
   const price = priceMatch ? `${priceMatch[1].replace(',', '.')}€` : undefined;
-  const lineWithoutPrice = priceMatch ? withoutBullets.replace(priceMatch[0], ' ').trim() : withoutBullets;
+  const lineWithoutPrice = (priceMatch ? withoutBullets.replace(priceMatch[0], ' ') : withoutBullets)
+    .replace(/\s*[-–—:]\s*$/, '')
+    .trim();
 
   const [namePart, ...descriptionParts] = lineWithoutPrice
     .split(/\s[-–—:]\s|\s{2,}/)
@@ -73,7 +75,7 @@ function parseLine(line: string, section?: string): MenuItem | null {
     normalizedName: normalizeText(rawName),
     description: description || undefined,
     price,
-    section,
+    section: inferSection(rawName) || section,
   };
 }
 
@@ -88,8 +90,17 @@ function cleanLine(line: string): string {
 function cleanDishName(value: string): string {
   return value
     .replace(/\b(x\s?\d+|\d+\s?pcs?|\d+\s?pi[eè]ces?)\b/gi, ' ')
+    .replace(/\s*[-–—:]\s*$/, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function inferSection(name: string): string {
+  const normalized = normalizeText(name);
+  if (/\b(cheesecake|dessert|tiramisu|brownie|cookie|gateau|mousse|glace|sorbet|crepe|panna cotta)\b/.test(normalized)) return 'Desserts';
+  if (/\b(frites?|potatoes|onion rings?|accompagnement)\b/.test(normalized)) return 'Accompagnements';
+  if (/\b(eau|soda|cola|limonade|jus|cafe|the|boisson)\b/.test(normalized)) return 'Boissons';
+  return '';
 }
 
 function splitLikelyJoinedLines(line: string): string[] {

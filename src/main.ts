@@ -3,8 +3,8 @@ import { SAMPLE_MENUS } from './data/dishes';
 import { EU_MAJOR_ALLERGENS, INGREDIENTS } from './data/ingredients';
 import { DEFAULT_PROFILE, RULE_DESCRIPTIONS, RULE_LABELS, STRICTNESS_LABELS } from './data/rules';
 import { analyzeMenuForGroup, analyzeMenuItems, sortGroupRowsByRisk, sortResultsByRisk } from './engine/compatibility';
-import { captureMenuPhoto } from './engine/camera';
-import { deleteRemoteLearnedDish, fetchCommunityContributions, fetchLearnedDishes, fetchPublicDatabase, fetchRestaurants, getBackendBaseUrl, pingBackend, pushCommunityContribution, pushLearnedDish, pushRestaurantMemory, pushScanRecord, searchRestaurantsRemote, updateContributionStatus } from './engine/backendClient';
+import { captureMenuPhoto, isNativeCameraAvailable } from './engine/camera';
+import { deleteRemoteLearnedDish, fetchCommunityContributions, fetchLearnedDishes, fetchPublicDatabase, fetchRestaurants, isBackendConfigured, pingBackend, pushCommunityContribution, pushLearnedDish, pushRestaurantMemory, pushScanRecord, searchRestaurantsRemote, updateContributionStatus } from './engine/backendClient';
 import { buildQuestionSheet, downloadScanAsJson } from './engine/export';
 import { applyModerationPatch, buildModerationReviews, buildModerationSummary, buildPublicDatabaseExport, contributionIsImportable, contributionToLearnedDish, downloadPublicDatabaseExport, findContributionDuplicateClusters, isContributionShareable, makeContributionFromAnalysis, makeContributionFromLearnedDish, mergeContributionCluster, summarizeContribution } from './engine/community';
 import { buildGroupSuggestions, buildOrderPlanText, buildSingleSuggestions } from './engine/recommendations';
@@ -87,10 +87,11 @@ const allergens = EU_MAJOR_ALLERGENS.map((item) => item.id);
 
 let profiles: UserProfile[] = loadProfiles();
 let settings: AppSettings = normalizeSettings(loadSettings());
-let menuText = SAMPLE_MENUS[0].text;
-let results: AnalysisResult[] = [];
-let groupRows: GroupAnalysisRow[] = [];
-let currentRecord: ScanRecord | null = null;
+let history = loadHistory();
+let currentRecord: ScanRecord | null = history[0] ?? null;
+let menuText = currentRecord?.rawText ?? SAMPLE_MENUS[0].text;
+let results: AnalysisResult[] = currentRecord?.results ?? [];
+let groupRows: GroupAnalysisRow[] = currentRecord?.groupRows ?? [];
 let imagePreview = '';
 let selectedImageName = '';
 let selectedImageFile: File | null = null;
@@ -100,8 +101,7 @@ let ocrZoneDraft = '';
 let translationReport: MenuTranslationReport | null = null;
 let translationSourceLanguage: MenuTranslationLanguage = 'auto';
 let translationStatus = '';
-let history = loadHistory();
-let activeSource: ScanRecord['source'] = 'sample';
+let activeSource: ScanRecord['source'] = currentRecord?.source ?? 'sample';
 let offLookups: Record<string, string> = {};
 let learnedDishes: LearnedDish[] = getLearnedDishes();
 let restaurantMemories: RestaurantMemory[] = loadRestaurants();
@@ -109,10 +109,13 @@ let activeRestaurantId = loadActiveRestaurantId();
 let restaurantDraft: RestaurantDraft = createRestaurantDraft(getActiveRestaurant());
 let restaurantRemoteMatches: RestaurantMemory[] = [];
 let orderPlanStatus = '';
+const backendConfigured = isBackendConfigured();
+const moderationEnabled = backendConfigured && ['localhost', '127.0.0.1'].includes(window.location.hostname);
 let backendHealth: BackendHealth | null = null;
-let backendStatus = 'Backend local non vérifié';
+let backendStatus = backendConfigured ? 'Service de synchronisation non vérifié' : 'Données conservées sur cet appareil';
 let syncStatus = '';
 let learningDraft: LearningDraft | null = null;
+let learningModalWasOpen = false;
 let communityQueue: PublicDishContribution[] = loadCommunityQueue();
 let publicDbCache: PublicDatabaseExport | null = loadCachedPublicDatabase();
 let communityStatus = '';
@@ -129,6 +132,7 @@ let serverAnswers: ServerAnswerMap = {};
 let serverAssistantStatus = '';
 
 type AppView = 'scanner' | 'results' | 'restaurants' | 'community' | 'profile';
+type ProfileTab = 'identity' | 'diet' | 'allergies' | 'personal' | 'history' | 'privacy';
 
 const APP_VIEWS: { id: AppView; label: string; title: string; description: string }[] = [
   { id: 'scanner', label: 'Scanner', title: 'Scanner un menu', description: 'Prends une photo ou colle le texte du menu, puis lance l’analyse.' },
@@ -158,6 +162,7 @@ function render() {
   const viewMeta = APP_VIEWS.find((item) => item.id === view) ?? APP_VIEWS[0];
 
   app.innerHTML = `
+    <a class="skip-link" href="#main-content">Aller au contenu principal</a>
     <div class="app-shell">
       <header class="app-header">
         <a class="brand" href="#/scanner" aria-label="Can I Eat It, scanner un menu">
@@ -180,9 +185,9 @@ function render() {
             <h1>${escapeHtml(viewMeta.title)}</h1>
             <p>${escapeHtml(viewMeta.description)}</p>
           </div>
-          <div class="screen-status" title="${escapeHtml(backendStatus)}">
-            <span class="backend-dot ${backendHealth?.ok ? 'backend-dot--online' : 'backend-dot--offline'}"></span>
-            <span>${backendHealth?.ok ? 'Synchronisé' : 'Mode local'}</span>
+          <div class="screen-status" title="${escapeHtml(backendStatus)}" role="status" aria-live="polite">
+            <span class="backend-dot ${backendHealth?.ok ? 'backend-dot--online' : backendConfigured ? 'backend-dot--offline' : 'backend-dot--local'}"></span>
+            <span>${backendHealth?.ok ? 'Synchronisé' : backendConfigured ? 'Service hors ligne' : 'Données locales'}</span>
           </div>
         </header>
 
@@ -195,6 +200,12 @@ function render() {
       ${learningDraft ? renderLearningModal(learningDraft) : ''}
     </div>
   `;
+
+  const shouldFocusLearningModal = Boolean(learningDraft) && !learningModalWasOpen;
+  learningModalWasOpen = Boolean(learningDraft);
+  if (shouldFocusLearningModal) {
+    window.requestAnimationFrame(() => document.querySelector<HTMLElement>('#learningDialog')?.focus());
+  }
 }
 
 function getAppView(): AppView {
@@ -262,9 +273,9 @@ function renderScannerScreen(activeProfile: UserProfile): string {
         </label>
 
         <div class="actions scan-photo-actions">
-          <button class="ghost" data-action="capture-camera">Ouvrir la caméra</button>
+          ${isNativeCameraAvailable() ? '<button class="ghost" data-action="capture-camera">Ouvrir la caméra</button>' : ''}
           <button class="ghost" data-action="run-ocr" ${selectedImageFile ? '' : 'disabled'}>Extraire le texte</button>
-          <span class="status-line">${escapeHtml(ocrStatus)}</span>
+          <span class="status-line" role="status" aria-live="polite">${escapeHtml(ocrStatus)}</span>
         </div>
 
         ${imagePreview ? `<div class="image-preview"><img src="${imagePreview}" alt="Photo du menu importée" /></div>` : ''}
@@ -290,8 +301,8 @@ function renderScannerScreen(activeProfile: UserProfile): string {
             <div><small>Analyse avec</small><strong>${escapeHtml(activeProfile.name)}</strong></div>
           </div>
           <div class="segmented" role="tablist" aria-label="Mode d'analyse">
-            <button class="segment ${settings.mode === 'single' ? 'segment--active' : ''}" data-action="set-mode" data-mode="single">Solo</button>
-            <button class="segment ${settings.mode === 'group' ? 'segment--active' : ''}" data-action="set-mode" data-mode="group">Groupe</button>
+            <button class="segment ${settings.mode === 'single' ? 'segment--active' : ''}" role="tab" aria-selected="${settings.mode === 'single'}" data-action="set-mode" data-mode="single">Solo</button>
+            <button class="segment ${settings.mode === 'group' ? 'segment--active' : ''}" role="tab" aria-selected="${settings.mode === 'group'}" data-action="set-mode" data-mode="group">Groupe</button>
           </div>
           ${settings.mode === 'group' ? renderGroupProfilePicker() : `
             <div class="profile-tag-list">
@@ -391,26 +402,13 @@ function renderResultsPanel(displayedResults: AnalysisResult[], displayedGroupRo
 
 function renderProfileScreen(activeProfile: UserProfile): string {
   const restrictionCount = activeProfile.rules.length + activeProfile.allergens.length + activeProfile.intolerances.length;
+  const activeTab = getProfileTab();
   return `
-    <div class="profile-layout">
-      <section class="card profile-card profile-editor-card">
-        <div class="card__header card__header--wrap">
-          <div><p class="eyebrow">Identité alimentaire</p><h2>Règles du profil</h2></div>
-          <div class="actions">
-            <button class="ghost" data-action="duplicate-profile">Dupliquer</button>
-            <button class="ghost" data-action="delete-profile" ${profiles.length <= 1 ? 'disabled' : ''}>Supprimer</button>
-          </div>
-        </div>
-
-        <label class="field">
-          <span>Profil à modifier</span>
-          <select id="activeProfileId">
-            ${profiles.map((item) => `<option value="${escapeHtml(item.id ?? '')}" ${item.id === activeProfile.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}
-          </select>
-        </label>
-        ${renderProfileEditor(activeProfile)}
+    ${renderProfileTabs(activeTab)}
+    <div class="profile-layout profile-layout--focused">
+      <section class="card profile-card profile-editor-card" aria-labelledby="profile-panel-title">
+        ${renderProfileTabContent(activeTab, activeProfile)}
       </section>
-
       <aside class="profile-aside">
         <section class="card profile-overview">
           <div class="profile-overview__identity">
@@ -423,59 +421,150 @@ function renderProfileScreen(activeProfile: UserProfile): string {
             <div><strong>${history.length}</strong><span>scans enregistrés</span></div>
           </div>
         </section>
-
-        <section class="card analysis-mode-card">
-          <p class="eyebrow">Mode d’analyse</p>
-          <h2>Solo ou groupe</h2>
-          <div class="segmented" role="tablist" aria-label="Mode d'analyse">
-            <button class="segment ${settings.mode === 'single' ? 'segment--active' : ''}" data-action="set-mode" data-mode="single">Solo</button>
-            <button class="segment ${settings.mode === 'group' ? 'segment--active' : ''}" data-action="set-mode" data-mode="group">Groupe</button>
-          </div>
-          ${settings.mode === 'group' ? renderGroupProfilePicker() : '<p class="muted">Le prochain scan utilisera uniquement le profil actif.</p>'}
-        </section>
-
-        <section class="card privacy-card">
-          <p class="eyebrow">Confidentialité</p>
-          <h2>Tes données restent privées</h2>
-          <p class="muted">Les profils, allergies et historiques restent dans ton navigateur. Seules les corrections anonymisées peuvent être partagées.</p>
-          <button class="ghost" data-action="reset-profiles">Réinitialiser les profils</button>
-        </section>
+        ${activeTab === 'identity' ? renderAnalysisModeCard() : ''}
       </aside>
     </div>
+  `;
+}
 
-    <section class="profile-data-grid">
-      ${renderHistoryCard()}
-      ${renderMemoryCard()}
+function getProfileTab(): ProfileTab {
+  const tab = window.location.hash.replace(/^#\/?/, '').split('/')[1] as ProfileTab;
+  return ['identity', 'diet', 'allergies', 'personal', 'history', 'privacy'].includes(tab) ? tab : 'identity';
+}
+
+function renderProfileTabs(activeTab: ProfileTab): string {
+  const tabs: Array<[ProfileTab, string]> = [
+    ['identity', 'Identité'],
+    ['diet', 'Alimentation'],
+    ['allergies', 'Allergies'],
+    ['personal', 'Personnalisation'],
+    ['history', 'Historique'],
+    ['privacy', 'Confidentialité'],
+  ];
+  return `
+    <nav class="section-tabs profile-tabs" aria-label="Sections du profil">
+      ${tabs.map(([id, label]) => `<a href="#/profile/${id}" class="section-tab ${activeTab === id ? 'section-tab--active' : ''}" ${activeTab === id ? 'aria-current="page"' : ''}>${label}</a>`).join('')}
+    </nav>
+  `;
+}
+
+function renderProfileTabContent(tab: ProfileTab, profile: UserProfile): string {
+  if (tab === 'diet') {
+    return `
+      <div class="card__header"><div><p class="eyebrow">Alimentation</p><h2 id="profile-panel-title">Règles alimentaires</h2></div></div>
+      <p class="muted">Active uniquement les règles qui doivent réellement modifier les recommandations.</p>
+      <div class="check-grid">
+        ${rules.map((rule) => renderCheckbox('rule', rule, RULE_LABELS[rule], profile.rules.includes(rule), RULE_DESCRIPTIONS[rule])).join('')}
+      </div>
+    `;
+  }
+  if (tab === 'allergies') {
+    return `
+      <div class="card__header"><div><p class="eyebrow">Sécurité</p><h2 id="profile-panel-title">Allergies et intolérances</h2></div></div>
+      <p class="muted">Une allergie est traitée plus strictement qu’une intolérance. En cas de doute, confirme toujours avec le restaurant.</p>
+      <h3>Allergies déclarées</h3>
+      <div class="check-grid">
+        ${EU_MAJOR_ALLERGENS.map((allergen) => renderCheckbox('allergen', allergen.id, allergen.label, profile.allergens.includes(allergen.id), allergen.examples)).join('')}
+      </div>
+      <h3>Intolérances et sensibilités</h3>
+      <div class="check-grid">
+        ${EU_MAJOR_ALLERGENS.map((allergen) => renderCheckbox('intolerance', allergen.id, allergen.label, profile.intolerances.includes(allergen.id), allergen.examples)).join('')}
+      </div>
+    `;
+  }
+  if (tab === 'personal') {
+    return `
+      <div class="card__header"><div><p class="eyebrow">Personnalisation</p><h2 id="profile-panel-title">Termes et corrections</h2></div></div>
+      <label class="field">
+        <span>Termes interdits personnalisés</span>
+        <input id="forbiddenTerms" type="text" value="${escapeHtml(profile.customForbiddenTerms.join(', '))}" placeholder="porc, alcool, gélatine..." />
+      </label>
+      <label class="field">
+        <span>Termes à vérifier personnalisés</span>
+        <input id="cautionTerms" type="text" value="${escapeHtml(profile.customCautionTerms.join(', '))}" placeholder="sauce maison, bouillon..." />
+      </label>
+      ${renderMemoryCard(true)}
+    `;
+  }
+  if (tab === 'history') return renderHistoryCard(true);
+  if (tab === 'privacy') {
+    return `
+      <div class="card__header"><div><p class="eyebrow">Confidentialité</p><h2 id="profile-panel-title">Données sur cet appareil</h2></div></div>
+      <div class="privacy-notice">
+        <strong>Stockage local non chiffré</strong>
+        <span>Les profils, allergies, historiques et corrections sont enregistrés dans le stockage de ce navigateur. Ils ne sont pas envoyés tant qu’aucun service de synchronisation n’est configuré.</span>
+      </div>
+      <p class="muted">Toute personne ayant accès à cette session de navigateur peut potentiellement consulter ces données. Évite un appareil partagé pour un profil sensible.</p>
+      <button class="ghost danger-action" data-action="reset-profiles">Réinitialiser profils et résultats</button>
+    `;
+  }
+  return `
+    <div class="card__header card__header--wrap">
+      <div><p class="eyebrow">Identité</p><h2 id="profile-panel-title">Profil utilisé pour l’analyse</h2></div>
+      <div class="actions">
+        <button class="ghost" data-action="duplicate-profile">Dupliquer</button>
+        <button class="ghost danger-action" data-action="delete-profile" ${profiles.length <= 1 ? 'disabled' : ''}>Supprimer</button>
+      </div>
+    </div>
+    <label class="field">
+      <span>Profil à modifier</span>
+      <select id="activeProfileId">
+        ${profiles.map((item) => `<option value="${escapeHtml(item.id ?? '')}" ${item.id === profile.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}
+      </select>
+    </label>
+    <label class="field"><span>Nom du profil</span><input id="profileName" type="text" value="${escapeHtml(profile.name)}" /></label>
+    <label class="field">
+      <span>Niveau de prudence</span>
+      <select id="strictness">
+        ${(['relaxed', 'normal', 'strict'] as Strictness[]).map((level) => `<option value="${level}" ${profile.strictness === level ? 'selected' : ''}>${STRICTNESS_LABELS[level]}</option>`).join('')}
+      </select>
+    </label>
+    <div class="notice"><strong>Important</strong><span>L’app aide à décider, mais ne remplace pas la confirmation du restaurant, surtout pour les allergies.</span></div>
+  `;
+}
+
+function renderAnalysisModeCard(): string {
+  return `
+    <section class="card analysis-mode-card">
+      <p class="eyebrow">Mode d’analyse</p>
+      <h2>Solo ou groupe</h2>
+      <div class="segmented" role="tablist" aria-label="Mode d'analyse">
+        <button class="segment ${settings.mode === 'single' ? 'segment--active' : ''}" role="tab" aria-selected="${settings.mode === 'single'}" data-action="set-mode" data-mode="single">Solo</button>
+        <button class="segment ${settings.mode === 'group' ? 'segment--active' : ''}" role="tab" aria-selected="${settings.mode === 'group'}" data-action="set-mode" data-mode="group">Groupe</button>
+      </div>
+      ${settings.mode === 'group' ? renderGroupProfilePicker() : '<p class="muted">Le prochain scan utilisera uniquement le profil actif.</p>'}
     </section>
   `;
 }
 
-function renderHistoryCard(): string {
+function renderHistoryCard(embedded = false): string {
+  const tag = embedded ? 'div' : 'article';
   return `
-    <article class="card history-card">
+    <${tag} class="${embedded ? 'embedded-profile-panel' : 'card'} history-card">
       <div class="card__header">
-        <div><p class="eyebrow">Historique</p><h2>${history.length} scan(s)</h2></div>
-        <button class="ghost" data-action="clear-history" ${history.length ? '' : 'disabled'}>Effacer</button>
+        <div><p class="eyebrow">Historique</p><h2 id="${embedded ? 'profile-panel-title' : 'history-card-title'}">${history.length} scan(s)</h2></div>
+        <button class="ghost danger-action" data-action="clear-history" ${history.length ? '' : 'disabled'}>Effacer</button>
       </div>
       ${history.length ? `<div class="history-list">${history.slice(0, 12).map(renderHistoryItem).join('')}</div>` : '<p class="muted">Tes prochaines analyses apparaîtront ici pour être consultées à nouveau.</p>'}
-    </article>
+    </${tag}>
   `;
 }
 
-function renderMemoryCard(): string {
+function renderMemoryCard(embedded = false): string {
+  const tag = embedded ? 'div' : 'article';
   return `
-    <article class="card memory-card">
+    <${tag} class="${embedded ? 'embedded-profile-panel' : 'card'} memory-card">
       <div class="card__header card__header--wrap">
         <div><p class="eyebrow">Mémoire personnelle</p><h2>${learnedDishes.length} correction(s)</h2></div>
-        <div class="actions">
+        ${backendConfigured ? `<div class="actions">
           <button class="ghost" data-action="refresh-backend">Tester la synchro</button>
           <button class="ghost" data-action="sync-backend">Synchroniser</button>
-        </div>
+        </div>` : ''}
       </div>
       <p class="muted">Les corrections apprises passent avant les estimations générales pour tes prochains scans.</p>
-      ${syncStatus ? `<p class="sync-status">${escapeHtml(syncStatus)}</p>` : ''}
+      ${syncStatus ? `<p class="sync-status" role="status" aria-live="polite">${escapeHtml(syncStatus)}</p>` : ''}
       ${learnedDishes.length ? `<div class="memory-list">${learnedDishes.slice(0, 12).map(renderLearnedDishItem).join('')}</div>` : '<p class="muted">Aucune correction apprise pour le moment.</p>'}
-    </article>
+    </${tag}>
   `;
 }
 
@@ -488,10 +577,10 @@ function renderCommunityScreen(): string {
         <div class="tag-cloud">${INGREDIENTS.slice(0, 24).map((ingredient) => `<span>${escapeHtml(ingredient.names[0])}</span>`).join('')}</div>
       </section>
       ${renderCommunityPanel()}
-      <details class="tool-drawer moderation-drawer">
+      ${moderationEnabled ? `<details class="tool-drawer moderation-drawer">
         <summary><span><strong>Modération et qualité</strong><small>Réservé à la validation des contributions publiques.</small></span><em>Ouvrir</em></summary>
         ${renderModerationPanel()}
-      </details>
+      </details>` : ''}
     </div>
   `;
 }
@@ -509,7 +598,7 @@ function renderAdvancedOcrPanel(): string {
     <section class="card advanced-ocr-card">
       <div class="card__header card__header--wrap">
         <div>
-          <p class="eyebrow">1.5 · OCR avancé V11</p>
+          <p class="eyebrow">Outils OCR</p>
           <h2>Diagnostic de lecture du menu</h2>
           <p class="muted">Nettoyage OCR, détection colonnes/sections/prix, lignes collées et zone à recontrôler avant l’analyse alimentaire.</p>
         </div>
@@ -587,7 +676,7 @@ function renderMenuTranslationPanel(): string {
     <section class="card translation-card">
       <div class="card__header card__header--wrap">
         <div>
-          <p class="eyebrow">1.6 · Traduction menu V12</p>
+          <p class="eyebrow">Traduction du menu</p>
           <h2>Menu étranger → texte exploitable par l’analyse</h2>
           <p class="muted">Détecte anglais, espagnol, italien, allemand, japonais, turc et arabe. Le nom original reste visible, mais les ingrédients traduits sont ajoutés pour le moteur alimentaire.</p>
         </div>
@@ -695,35 +784,37 @@ function renderSafeOrderMode(): string {
       <section class="card safe-order-card safe-order-card--empty">
         <div class="card__header card__header--wrap">
           <div>
-            <p class="eyebrow">2.9 · Commande sûre V9/V12</p>
-            <h2>Décision rapide avant de commander</h2>
+          <p class="eyebrow">Décision</p>
+          <h2>Comparer les options avant de commander</h2>
           </div>
           <div class="toolbar">
-            <button class="ghost" disabled>Copier plan sûr</button>
+            <button class="ghost" disabled>Copier le plan</button>
             <button class="ghost" disabled>Script serveur</button>
           </div>
         </div>
         <div class="safe-order-empty">
           <strong>Analyse un menu pour générer le plan de commande.</strong>
-          <span>La V9/V12 transforme les résultats en liste pratique : à commander, à modifier, à demander, et à éviter.</span>
+          <span>Les résultats seront séparés entre options compatibles, options à confirmer et plats à éviter.</span>
         </div>
       </section>
     `;
   }
 
-  const topChoice = plan.bestChoices[0] ?? plan.conditionalChoices[0] ?? plan.unknownChoices[0] ?? null;
+  const safeChoice = plan.bestChoices[0] ?? null;
+  const fallbackChoice = plan.conditionalChoices[0] ?? plan.unknownChoices[0] ?? null;
   const cautionLabel = plan.conditionalChoices.length + plan.unknownChoices.length;
 
   return `
     <section class="card safe-order-card safe-order-card--v9">
       <div class="card__header card__header--wrap">
         <div>
-          <p class="eyebrow">2.9 · Commande sûre V9/V12</p>
-          <h2>${topChoice ? `Meilleur choix : ${escapeHtml(topChoice.itemName)}` : 'Aucun choix sûr détecté'}</h2>
+          <p class="eyebrow">Décision</p>
+          <h2>${safeChoice ? `Option compatible : ${escapeHtml(safeChoice.itemName)}` : 'Aucune option confirmée compatible'}</h2>
+          ${!safeChoice && fallbackChoice ? `<p class="decision-caution">À vérifier en premier : <strong>${escapeHtml(fallbackChoice.itemName)}</strong>. Ne commande pas sans confirmation.</p>` : ''}
           <p class="muted">${escapeHtml(plan.restaurantName ? `${plan.restaurantName} · ${plan.mode === 'group' ? 'mode groupe' : plan.activeProfileName}` : `${plan.mode === 'group' ? 'mode groupe' : plan.activeProfileName}`)}</p>
         </div>
         <div class="toolbar">
-          <button class="ghost" data-action="copy-safe-order-plan">Copier plan sûr</button>
+          <button class="ghost" data-action="copy-safe-order-plan">Copier le plan</button>
           <button class="ghost" data-action="copy-safe-order-script">Script serveur</button>
           <button class="ghost" data-action="copy-safe-order-questions" ${plan.questions.length ? '' : 'disabled'}>Copier questions</button>
           <button class="ghost" data-action="copy-safe-order-avoid" ${plan.avoidChoices.length ? '' : 'disabled'}>Copier à éviter</button>
@@ -737,7 +828,7 @@ function renderSafeOrderMode(): string {
         <div class="safe-order-metric"><strong>${plan.questions.length}</strong><span>questions utiles</span></div>
       </div>
 
-      ${plan.safetyWarnings.length ? `<div class="safe-order-warnings">${plan.safetyWarnings.map((warning) => `<span>⚠️ ${escapeHtml(warning)}</span>`).join('')}</div>` : ''}
+      ${plan.safetyWarnings.length ? `<div class="safe-order-warnings">${plan.safetyWarnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join('')}</div>` : ''}
 
       <div class="safe-order-layout">
         <div class="safe-order-column safe-order-column--best">
@@ -811,10 +902,10 @@ function renderSafeOrderChoice(choice: SafeOrderChoice): string {
       <div class="safe-order-choice__top">
         <span class="status-badge status-badge--${choice.status}">${statusLabel(choice.status)}</span>
         <strong>${escapeHtml(choice.itemName)}</strong>
-        <em>${choice.score}/100</em>
+        <em>${confidenceLabel(choice.confidence)}</em>
       </div>
       <p>${escapeHtml(choice.subtitle)}</p>
-      <small>${escapeHtml(safeOrderActionLabel(choice.action))} · ${escapeHtml(choice.audienceLabel)} · ${confidenceLabel(choice.confidence)}</small>
+      <small>${escapeHtml(safeOrderActionLabel(choice.action))} · ${escapeHtml(choice.audienceLabel)}</small>
       ${breakdown}
       ${modifications.length ? `<div class="safe-order-choice__mods">${modifications.map((modification) => `<span>${escapeHtml(modification.label)}</span>`).join('')}</div>` : ''}
       ${choice.blockers.length ? `<ul>${choice.blockers.slice(0, 3).map((blocker) => `<li>${escapeHtml(blocker)}</li>`).join('')}</ul>` : ''}
@@ -858,7 +949,7 @@ function renderServerAssistantPanel(): string {
       <section class="card server-assistant-card server-assistant-card--empty">
         <div class="card__header card__header--wrap">
           <div>
-            <p class="eyebrow">3.0 · Assistant serveur V12</p>
+            <p class="eyebrow">Assistant serveur</p>
             <h2>Questions prêtes à lire au restaurant</h2>
           </div>
           <div class="toolbar">
@@ -868,7 +959,7 @@ function renderServerAssistantPanel(): string {
         </div>
         <div class="safe-order-empty">
           <strong>Analyse un menu pour générer l’assistant serveur.</strong>
-          <span>La V12 transforme les questions en script multilingue, avec réponses cochables et réanalyse immédiate.</span>
+          <span>Les questions prioritaires seront regroupées en un script court, avec suivi des réponses.</span>
         </div>
       </section>
     `;
@@ -886,20 +977,26 @@ function renderServerAssistantPanel(): string {
     <section class="card server-assistant-card server-assistant-card--v11">
       <div class="card__header card__header--wrap">
         <div>
-          <p class="eyebrow">3.0 · Assistant serveur V12</p>
+          <p class="eyebrow">Questions prioritaires</p>
           <h2>Assistant serveur · ${escapeHtml(languageName(serverAssistantLanguage))}</h2>
           <p class="muted">Script prêt à lire, mode urgence, réponses cochables et réanalyse après confirmation serveur.</p>
         </div>
         <div class="toolbar">
           <button class="ghost" data-action="copy-server-assistant-main">Copier script</button>
           <button class="ghost" data-action="copy-server-assistant-compact">Version courte</button>
-          <button class="ghost" data-action="copy-server-assistant-emergency">Urgence allergie</button>
           <button class="ghost" data-action="speak-server-assistant">Lire à voix haute</button>
-          <button class="ghost" data-action="copy-server-answer-sheet">Copier réanalyse</button>
-          <button class="ghost" data-action="save-server-answer-sheet">Enregistrer</button>
-          <button class="ghost" data-action="reset-server-answers" ${summary.answered ? '' : 'disabled'}>Reset réponses</button>
         </div>
       </div>
+
+      <details class="compact-action-drawer">
+        <summary>Actions après échange</summary>
+        <div class="actions">
+          <button class="ghost" data-action="copy-server-assistant-emergency">Script urgence allergie</button>
+          <button class="ghost" data-action="copy-server-answer-sheet">Copier les réponses</button>
+          <button class="ghost" data-action="save-server-answer-sheet">Enregistrer les réponses</button>
+          <button class="ghost danger-action" data-action="reset-server-answers" ${summary.answered ? '' : 'disabled'}>Effacer les réponses</button>
+        </div>
+      </details>
 
       <div class="server-assistant-controls">
         <label class="field field--compact">
@@ -936,16 +1033,13 @@ function renderServerAssistantPanel(): string {
         </div>
       </div>
 
-      ${serverAssistantStatus ? `<p class="sync-status">${escapeHtml(serverAssistantStatus)}</p>` : ''}
+      ${serverAssistantStatus ? `<p class="sync-status" role="status" aria-live="polite">${escapeHtml(serverAssistantStatus)}</p>` : ''}
 
       <div class="server-assistant-layout">
-        <div class="server-assistant-script">
-          <div class="server-assistant-script__title">
-            <strong>Script principal</strong>
-            <span>${escapeHtml(assistant.mainScript.lines.length.toString())} question(s)</span>
-          </div>
+        <details class="server-assistant-script server-assistant-script-drawer">
+          <summary>Voir le script principal · ${escapeHtml(assistant.mainScript.lines.length.toString())} question(s)</summary>
           <pre>${escapeHtml(assistant.mainScript.fullText)}</pre>
-        </div>
+        </details>
 
         <div class="server-assistant-questions">
           <div class="server-assistant-script__title">
@@ -989,8 +1083,13 @@ function renderServerAssistantQuestion(
       <p>${escapeHtml(text)}</p>
       ${originalBlock}
       <div class="server-question__answers">
-        ${values.map((value) => `<button class="ghost ${answer === value ? 'ghost--active' : ''}" data-action="server-answer" data-question-id="${escapeHtml(questionId)}" data-answer="${value}">${escapeHtml(answerValueLabel(value))}</button>`).join('')}
-        <button class="ghost ${answer === 'unanswered' ? 'ghost--active' : ''}" data-action="server-answer" data-question-id="${escapeHtml(questionId)}" data-answer="unanswered">Effacer</button>
+        <label class="field field--compact">
+          <span>Réponse du serveur</span>
+          <select data-action="server-answer-select" data-question-id="${escapeHtml(questionId)}">
+            <option value="unanswered" ${answer === 'unanswered' ? 'selected' : ''}>Non répondu</option>
+            ${values.filter((value) => value !== 'unanswered').map((value) => `<option value="${value}" ${answer === value ? 'selected' : ''}>${escapeHtml(answerValueLabel(value))}</option>`).join('')}
+          </select>
+        </label>
       </div>
     </article>
   `;
@@ -1085,20 +1184,26 @@ function renderRestaurantCockpit(): string {
     <section class="card restaurant-card restaurant-card--v9">
       <div class="card__header card__header--wrap">
         <div>
-          <p class="eyebrow">2.5 · Recherche restaurant intelligente V12</p>
-          <h2>${activeRestaurant ? `Tu es sur ${escapeHtml(activeRestaurant.name)}` : 'Trouver, noter et réutiliser un restaurant'}</h2>
+          <p class="eyebrow">Carnet de restaurants</p>
+          <h2>${activeRestaurant ? escapeHtml(activeRestaurant.name) : 'Retrouver un restaurant connu'}</h2>
         </div>
         <div class="toolbar">
-          <button class="ghost" data-action="save-restaurant">Sauvegarder fiche</button>
+          <button class="ghost" data-action="save-restaurant" ${restaurantDraft.name || activeRestaurant ? '' : 'disabled'}>Sauvegarder fiche</button>
           <button class="ghost" data-action="restaurant-i-am-here" ${restaurantDraft.name || activeRestaurant ? '' : 'disabled'}>Je suis ici</button>
-          <button class="ghost" data-action="toggle-active-restaurant-favorite" ${activeRestaurant ? '' : 'disabled'}>${activeRestaurant?.favorite ? '★ Favori' : '☆ Favori'}</button>
-          <button class="ghost" data-action="restaurant-load-known-menu" ${activeInsight?.knownDishes.length ? '' : 'disabled'}>Charger menu connu</button>
-          <button class="ghost" data-action="restaurant-copy-known-menu" ${activeInsight?.knownDishes.length ? '' : 'disabled'}>Copier menu connu</button>
-          <button class="ghost" data-action="sync-restaurants">Sync restaurants</button>
           <button class="ghost" data-action="copy-order-plan" ${currentRecord ? '' : 'disabled'}>Copier plan de commande</button>
-          <button class="ghost" data-action="clear-restaurant" ${activeRestaurant || restaurantDraft.name ? '' : 'disabled'}>Détacher</button>
         </div>
       </div>
+
+      <details class="compact-action-drawer">
+        <summary>Plus d’actions</summary>
+        <div class="actions">
+          <button class="ghost" data-action="toggle-active-restaurant-favorite" ${activeRestaurant ? '' : 'disabled'}>${activeRestaurant?.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris'}</button>
+          <button class="ghost" data-action="restaurant-load-known-menu" ${activeInsight?.knownDishes.length ? '' : 'disabled'}>Charger menu connu</button>
+          <button class="ghost" data-action="restaurant-copy-known-menu" ${activeInsight?.knownDishes.length ? '' : 'disabled'}>Copier menu connu</button>
+          ${backendConfigured ? '<button class="ghost" data-action="sync-restaurants">Synchroniser</button>' : ''}
+          <button class="ghost" data-action="clear-restaurant" ${activeRestaurant || restaurantDraft.name ? '' : 'disabled'}>Détacher</button>
+        </div>
+      </details>
 
       <div class="restaurant-searchbar">
         <label class="field">
@@ -1119,25 +1224,29 @@ function renderRestaurantCockpit(): string {
           <input id="restaurantOnlyFavorites" type="checkbox" ${settings.restaurantOnlyFavorites ? 'checked' : ''} />
           Favoris seuls
         </label>
-        <button class="ghost" data-action="restaurant-remote-search">Chercher backend</button>
+        ${backendConfigured ? '<button class="ghost" data-action="restaurant-remote-search">Chercher en ligne</button>' : ''}
       </div>
 
       <div class="restaurant-stats-v9">
         <div><strong>${restaurantMemories.length}</strong><span>fiches locales</span><small>${favorites} favori(s) · ${recent} récent(s)</small></div>
-        <div><strong>${restaurantRemoteMatches.length}</strong><span>résultat(s) backend</span><small>recherche réseau optionnelle</small></div>
-        <div><strong>${activeInsight?.knownDishes.length ?? 0}</strong><span>plats connus actifs</span><small>${activeInsight ? `${activeInsight.trustedDishCount} source(s) fiable(s)` : 'aucun restaurant actif'}</small></div>
-        <div><strong>${activeInsight?.compatibility.safe ?? 0}</strong><span>compatibles actifs</span><small>${activeInsight?.compatibility.total ? `${Math.round(activeInsight.compatibility.safeRatio * 100)}% OK` : 'menu inconnu'}</small></div>
+        ${backendConfigured ? `<div><strong>${restaurantRemoteMatches.length}</strong><span>résultat(s) distant(s)</span><small>service de synchronisation</small></div>` : ''}
+        ${activeInsight ? `
+          <div><strong>${activeInsight.knownDishes.length}</strong><span>plats connus</span><small>${activeInsight.trustedDishCount} source(s) fiable(s)</small></div>
+          <div><strong>${activeInsight.compatibility.safe}</strong><span>plats compatibles</span><small>${activeInsight.compatibility.total ? `${activeInsight.compatibility.safe} sur ${activeInsight.compatibility.total} connus` : 'menu inconnu'}</small></div>
+        ` : ''}
       </div>
 
       ${activeInsight ? renderActiveRestaurantDashboard(activeInsight) : `
         <div class="restaurant-empty-dashboard">
           <strong>Aucun restaurant actif.</strong>
-          <span>Recherche une enseigne, clique “Utiliser”, ou renseigne une nouvelle fiche puis “Je suis ici”.</span>
+          <span>Recherche une fiche existante ou ajoute simplement le nom d’un restaurant.</span>
         </div>
       `}
 
       <div class="restaurant-layout restaurant-layout--v9">
-        <div class="restaurant-form">
+        <details class="restaurant-editor-drawer" ${activeRestaurant || restaurantDraft.name ? 'open' : ''}>
+          <summary>${activeRestaurant ? 'Modifier la fiche active' : 'Ajouter un restaurant manuellement'}</summary>
+          <div class="restaurant-form">
           <label class="field">
             <span>Nom restaurant / enseigne</span>
             <input id="restaurantName" type="text" value="${escapeHtml(restaurantDraft.name)}" placeholder="Ex : O'Tacos, pizzeria, cantine, restaurant local…" />
@@ -1156,34 +1265,35 @@ function renderRestaurantCockpit(): string {
             <span>Notes restaurant</span>
             <textarea id="restaurantNotes" rows="4" placeholder="Ex : dit halal mais certification à vérifier, sauce blanche lactée, friteuse séparée…">${escapeHtml(restaurantDraft.notes)}</textarea>
           </label>
-          <p class="muted">La V12 combine fiches locales, plats appris, contributions publiques et cache offline pour recommander le restaurant le plus utile selon le profil actif.</p>
-          ${orderPlanStatus ? `<p class="sync-status">${escapeHtml(orderPlanStatus)}</p>` : ''}
-        </div>
+          <p class="muted">Les fiches locales et les plats corrigés servent de repères lors des prochaines visites.</p>
+          ${orderPlanStatus ? `<p class="sync-status" role="status" aria-live="polite">${escapeHtml(orderPlanStatus)}</p>` : ''}
+          </div>
+        </details>
 
         <aside class="restaurant-memory restaurant-memory--v9">
           <div class="card__header card__header--compact">
             <div>
-              <p class="eyebrow">Résultats intelligents</p>
+              <p class="eyebrow">Résultats</p>
               <h3>${restaurantInsights.length ? `${restaurantInsights.length} restaurant(s)` : 'Aucun résultat'}</h3>
             </div>
           </div>
-          ${restaurantInsights.length ? `<div class="restaurant-list restaurant-list--smart">${restaurantInsights.map(renderRestaurantInsightCard).join('')}</div>` : '<p class="muted">Aucun restaurant trouvé. Sauvegarde une fiche, télécharge la base publique ou synchronise le backend SQLite.</p>'}
+          ${restaurantInsights.length ? `<div class="restaurant-list restaurant-list--smart">${restaurantInsights.map(renderRestaurantInsightCard).join('')}</div>` : '<p class="muted">Aucun restaurant trouvé. Ajoute une fiche avec le formulaire.</p>'}
         </aside>
       </div>
 
-      <div class="recommendation-panel">
+      ${activeRestaurant ? `<div class="recommendation-panel">
         <div>
           <p class="eyebrow">Recommandations du scan actuel</p>
           <h3>${suggestions.length ? 'Meilleurs choix selon le profil actuel' : 'Analyse un menu pour obtenir les meilleurs choix'}</h3>
         </div>
         ${suggestions.length ? `<div class="suggestion-grid">${suggestions.map(renderOrderSuggestion).join('')}</div>` : '<p class="muted">Le cockpit affichera les plats les plus sûrs, les plats à vérifier et les questions prioritaires à poser avant de commander.</p>'}
-      </div>
+      </div>` : ''}
     </section>
   `;
 }
 function renderRestaurantSortOptions(): string {
   const options: Array<[AppSettings['restaurantSort'], string]> = [
-    ['smart', 'Score intelligent'],
+    ['smart', 'Pertinence'],
     ['recent', 'Récents'],
     ['safe', 'Meilleurs pour le profil'],
     ['name', 'Nom A-Z'],
@@ -1196,9 +1306,9 @@ function renderActiveRestaurantDashboard(insight: ReturnType<typeof buildRestaur
   return `
     <div class="active-restaurant-dashboard active-restaurant-dashboard--${compatibility.safeRatio >= 0.5 ? 'good' : compatibility.total ? 'mixed' : 'empty'}">
       <div class="restaurant-score-ring">
-        <strong>${insight.score}</strong>
-        <span>/100</span>
-        <small>score resto</small>
+        <strong>${compatibility.safe}</strong>
+        <span>/${compatibility.total}</span>
+        <small>compatibles</small>
       </div>
       <div class="restaurant-dashboard-main">
         <div class="restaurant-dashboard-title">
@@ -1206,7 +1316,7 @@ function renderActiveRestaurantDashboard(insight: ReturnType<typeof buildRestaur
             <h3>${escapeHtml(insight.restaurant.name)}</h3>
             <small>${escapeHtml([insight.restaurant.city, insight.restaurant.address].filter(Boolean).join(' · ') || 'localisation non renseignée')}</small>
           </div>
-          <span class="favorite-mark">${insight.restaurant.favorite ? '★ favori' : '☆ non favori'}</span>
+          <span class="favorite-mark">${insight.restaurant.favorite ? 'Favori' : 'Non favori'}</span>
         </div>
         <div class="restaurant-reasons">${insight.matchReasons.map((reason) => `<span>${escapeHtml(reason)}</span>`).join('')}</div>
         <div class="restaurant-compat-row">
@@ -1214,7 +1324,7 @@ function renderActiveRestaurantDashboard(insight: ReturnType<typeof buildRestaur
           <span class="dot dot--caution">${compatibility.caution}</span>
           <span class="dot dot--blocked">${compatibility.blocked}</span>
           <span class="dot dot--unknown">${compatibility.unknown}</span>
-          <em>${compatibility.total ? `${Math.round(compatibility.safeRatio * 100)}% compatible · score moyen ${compatibility.averageScore}` : 'aucun menu connu à analyser'}</em>
+          <em>${compatibility.total ? `${compatibility.safe} plat(s) compatible(s) sur ${compatibility.total}` : 'aucun menu connu à analyser'}</em>
         </div>
         ${compatibility.bestDishes.length ? `
           <div class="known-best-dishes">
@@ -1238,9 +1348,9 @@ function renderRestaurantInsightCard(insight: ReturnType<typeof buildRestaurantI
   return `
     <article class="restaurant-smart-card ${isActive ? 'restaurant-smart-card--active' : ''}">
       <button class="restaurant-smart-card__main" data-action="load-restaurant" data-restaurant-id="${escapeHtml(restaurant.id)}">
-        <span class="restaurant-rank-score">${insight.score}</span>
+        <span class="restaurant-rank-score">${compatibility.safe}/${compatibility.total}</span>
         <span class="restaurant-smart-info">
-          <strong>${escapeHtml(restaurant.favorite ? `★ ${restaurant.name}` : restaurant.name)}</strong>
+          <strong>${escapeHtml(restaurant.name)}</strong>
           <small>${escapeHtml([restaurant.city, restaurant.address].filter(Boolean).join(' · ') || 'Sans localisation')}</small>
           <em>${escapeHtml(insight.matchReasons.join(' · '))}</em>
         </span>
@@ -1254,7 +1364,7 @@ function renderRestaurantInsightCard(insight: ReturnType<typeof buildRestaurantI
       <div class="restaurant-smart-actions">
         <button class="ghost" data-action="restaurant-i-am-here-id" data-restaurant-id="${escapeHtml(restaurant.id)}">Utiliser</button>
         <button class="ghost" data-action="restaurant-load-known-menu-id" data-restaurant-id="${escapeHtml(restaurant.id)}" ${insight.knownDishes.length ? '' : 'disabled'}>Menu</button>
-        <button class="ghost" data-action="toggle-restaurant-favorite-id" data-restaurant-id="${escapeHtml(restaurant.id)}">${restaurant.favorite ? '★' : '☆'}</button>
+        <button class="ghost" data-action="toggle-restaurant-favorite-id" data-restaurant-id="${escapeHtml(restaurant.id)}" aria-label="${restaurant.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris'}">${restaurant.favorite ? 'Favori' : 'Ajouter favori'}</button>
         ${restaurant.id.startsWith('public-restaurant-') || restaurant.id.startsWith('queued-restaurant-') ? '' : `<button class="icon-button" data-action="forget-restaurant" data-restaurant-id="${escapeHtml(restaurant.id)}" aria-label="Oublier ${escapeHtml(restaurant.name)}">×</button>`}
       </div>
     </article>
@@ -1286,51 +1396,55 @@ function renderCommunityPanel(): string {
     <section class="card community-card">
       <div class="card__header card__header--wrap">
         <div>
-          <p class="eyebrow">2.75 · Community database V12</p>
-          <h2>Base publique partageable, sans publier le profil utilisateur</h2>
+          <p class="eyebrow">Contributions</p>
+          <h2>${backendConfigured ? 'Base publique sans profil utilisateur' : 'Préparer des corrections localement'}</h2>
         </div>
         <div class="toolbar">
-          <button class="ghost" data-action="community-sync">Sync contributions</button>
-          <button class="ghost" data-action="community-fetch-db">Télécharger base publique</button>
+          ${backendConfigured ? `
+            <button class="ghost" data-action="community-sync">Synchroniser</button>
+            <button class="ghost" data-action="community-fetch-db">Actualiser la base</button>
+          ` : ''}
           <button class="ghost" data-action="community-import-public-db" ${cachedDishes.length ? '' : 'disabled'}>Importer dans mémoire</button>
-          <button class="ghost" data-action="community-export-github-json">Exporter GitHub JSON</button>
-          <button class="ghost" data-action="community-clear-queue" ${communityQueue.length ? '' : 'disabled'}>Vider file locale</button>
+          <button class="ghost" data-action="community-export-github-json">Exporter JSON</button>
+          <button class="ghost danger-action" data-action="community-clear-queue" ${communityQueue.length ? '' : 'disabled'}>Vider la file</button>
         </div>
       </div>
 
       <div class="privacy-notice">
-        <strong>Partage sécurisé :</strong>
-        <span>l’app envoie uniquement plat, restaurant, ville/adresse optionnelle, ingrédients et notes de source. Elle n’envoie jamais ton profil, tes allergies personnelles, ta religion, ton historique privé ou tes règles custom.</span>
+        <strong>${backendConfigured ? 'Données partagées' : 'Données locales'}</strong>
+        <span>${backendConfigured
+          ? 'Seuls le plat, le restaurant, la localisation optionnelle, les ingrédients et les notes de source sont envoyés. Le profil, les allergies personnelles et l’historique restent exclus.'
+          : 'Les corrections restent dans ce navigateur jusqu’à un export manuel. Le profil, les allergies personnelles et l’historique ne sont jamais inclus dans cet export.'}</span>
       </div>
 
       <div class="community-stats">
         <div><strong>${communityQueue.length}</strong><span>contribution(s) locale(s)</span><small>${pendingLocal} en attente · ${pushedLocal} déjà envoyée(s)</small></div>
         <div><strong>${cached?.stats.contributions ?? 0}</strong><span>plat(s) dans cache public</span><small>${cached ? new Date(cached.exportedAt).toLocaleString('fr-FR') : 'aucun cache téléchargé'}</small></div>
-        <div><strong>${backendHealth?.contributions ?? 0}</strong><span>contribution(s) backend</span><small>${backendHealth?.verifiedContributions ?? 0} vérifiée(s)/trusted</small></div>
+        ${backendConfigured ? `<div><strong>${backendHealth?.contributions ?? 0}</strong><span>contribution(s) distante(s)</span><small>${backendHealth?.verifiedContributions ?? 0} vérifiée(s)</small></div>` : ''}
       </div>
 
-      ${communityStatus ? `<p class="sync-status">${escapeHtml(communityStatus)}</p>` : ''}
+      ${communityStatus ? `<p class="sync-status" role="status" aria-live="polite">${escapeHtml(communityStatus)}</p>` : ''}
 
       <div class="community-layout">
         <article class="community-column">
           <div class="card__header card__header--compact">
             <div>
-              <p class="eyebrow">File locale offline</p>
-              <h3>Corrections prêtes à partager</h3>
+              <p class="eyebrow">File locale</p>
+              <h3>Corrections préparées</h3>
             </div>
           </div>
-          ${queuePreview.length ? `<div class="community-list">${queuePreview.map(renderCommunityContributionItem).join('')}</div>` : '<p class="muted">Aucune contribution. Analyse un plat puis clique sur “Partager public”.</p>'}
+          ${queuePreview.length ? `<div class="community-list">${queuePreview.map(renderCommunityContributionItem).join('')}</div>` : '<p class="muted">Aucune correction préparée. Analyse un plat puis utilise “Préparer le partage”.</p>'}
         </article>
 
         <article class="community-column">
           <div class="card__header card__header--compact">
             <div>
-              <p class="eyebrow">Base publique téléchargée</p>
+              <p class="eyebrow">Base publique en cache</p>
               <h3>${publicSearchResults.length ? `${publicSearchResults.length} résultat(s)` : 'Aperçu du cache public'}</h3>
             </div>
             <input id="communitySearch" type="search" value="${escapeHtml(communitySearch)}" placeholder="chercher burger, pizza, restaurant…" />
           </div>
-          ${preview.length ? `<div class="community-list">${preview.map(renderCommunityContributionItem).join('')}</div>` : '<p class="muted">Lance “Télécharger base publique” quand le backend communautaire est disponible, ou exporte ta base locale au format GitHub JSON.</p>'}
+          ${preview.length ? `<div class="community-list">${preview.map(renderCommunityContributionItem).join('')}</div>` : `<p class="muted">${backendConfigured ? 'Actualise la base publique pour afficher les plats validés.' : 'Aucune base publique n’est embarquée. Les corrections locales peuvent être exportées en JSON.'}</p>`}
         </article>
       </div>
     </section>
@@ -1374,7 +1488,7 @@ function renderModerationPanel(): string {
     <section class="card moderation-card">
       <div class="card__header card__header--wrap">
         <div>
-          <p class="eyebrow">2.9 · Modération & qualité V12</p>
+          <p class="eyebrow">Modération et qualité</p>
           <h2>Valider, rejeter ou fusionner avant export public</h2>
         </div>
         <div class="toolbar">
@@ -1386,7 +1500,7 @@ function renderModerationPanel(): string {
 
       <div class="quality-notice">
         <strong>But :</strong>
-        <span>la V12 ne rend pas la base publique “automatique et sale”. Elle garde les contributions en attente, détecte les doublons, conseille un statut et pousse seulement les données publiques anonymisées.</span>
+        <span>Les contributions restent en attente, les doublons sont signalés et seules les données anonymisées validées peuvent rejoindre la base publique.</span>
       </div>
 
       <div class="moderation-stats">
@@ -1548,20 +1662,6 @@ function filterModerationItems(items: PublicDishContribution[]): PublicDishContr
   });
 }
 
-function renderRestaurantMemoryItem(restaurant: RestaurantMemory): string {
-  const isActive = restaurant.id === activeRestaurantId;
-  return `
-    <div class="restaurant-item ${isActive ? 'restaurant-item--active' : ''}">
-      <button data-action="load-restaurant" data-restaurant-id="${escapeHtml(restaurant.id)}">
-        <strong>${escapeHtml(restaurant.name)}</strong>
-        <small>${escapeHtml([restaurant.city, restaurant.address].filter(Boolean).join(' · ') || 'Sans localisation')}</small>
-        ${restaurant.notes ? `<span>${escapeHtml(restaurant.notes)}</span>` : ''}
-      </button>
-      <button class="icon-button" data-action="forget-restaurant" data-restaurant-id="${escapeHtml(restaurant.id)}" aria-label="Oublier ${escapeHtml(restaurant.name)}">×</button>
-    </div>
-  `;
-}
-
 function renderOrderSuggestion(suggestion: ReturnType<typeof buildSingleSuggestions>[number]): string {
   return `
     <article class="suggestion suggestion--${suggestion.status}">
@@ -1570,58 +1670,6 @@ function renderOrderSuggestion(suggestion: ReturnType<typeof buildSingleSuggesti
       <small>${escapeHtml(suggestion.subtitle)}</small>
       <em>${suggestion.questions.length ? `${suggestion.questions.length} question(s) à poser` : 'Aucune question prioritaire'}</em>
     </article>
-  `;
-}
-
-function renderProfileEditor(profile: UserProfile): string {
-  return `
-    <label class="field">
-      <span>Nom du profil</span>
-      <input id="profileName" type="text" value="${escapeHtml(profile.name)}" />
-    </label>
-
-    <label class="field">
-      <span>Niveau de prudence</span>
-      <select id="strictness">
-        ${(['relaxed', 'normal', 'strict'] as Strictness[]).map((level) => `<option value="${level}" ${profile.strictness === level ? 'selected' : ''}>${STRICTNESS_LABELS[level]}</option>`).join('')}
-      </select>
-    </label>
-
-    <details open>
-      <summary>Alimentation / religion / pratique</summary>
-      <div class="check-grid">
-        ${rules.map((rule) => renderCheckbox('rule', rule, RULE_LABELS[rule], profile.rules.includes(rule), RULE_DESCRIPTIONS[rule])).join('')}
-      </div>
-    </details>
-
-    <details>
-      <summary>Allergies déclarées</summary>
-      <div class="check-grid">
-        ${EU_MAJOR_ALLERGENS.map((allergen) => renderCheckbox('allergen', allergen.id, allergen.label, profile.allergens.includes(allergen.id), allergen.examples)).join('')}
-      </div>
-    </details>
-
-    <details>
-      <summary>Intolérances / sensibilité</summary>
-      <div class="check-grid">
-        ${EU_MAJOR_ALLERGENS.map((allergen) => renderCheckbox('intolerance', allergen.id, allergen.label, profile.intolerances.includes(allergen.id), allergen.examples)).join('')}
-      </div>
-    </details>
-
-    <label class="field">
-      <span>Termes interdits personnalisés</span>
-      <input id="forbiddenTerms" type="text" value="${escapeHtml(profile.customForbiddenTerms.join(', '))}" placeholder="porc, alcool, gélatine..." />
-    </label>
-
-    <label class="field">
-      <span>Termes à vérifier personnalisés</span>
-      <input id="cautionTerms" type="text" value="${escapeHtml(profile.customCautionTerms.join(', '))}" placeholder="sauce maison, bouillon..." />
-    </label>
-
-    <div class="notice">
-      <strong>Important</strong>
-      <span>L’app aide à décider, mais ne remplace pas la confirmation du restaurant, surtout pour les allergies.</span>
-    </div>
   `;
 }
 
@@ -1674,12 +1722,12 @@ function renderLearningModal(draft: LearningDraft): string {
     .filter((ingredient): ingredient is Ingredient => Boolean(ingredient));
 
   return `
-    <div class="modal-backdrop" role="dialog" aria-modal="true" aria-label="Correction guidée du plat">
-      <div class="learning-modal">
+    <div class="modal-backdrop">
+      <div class="learning-modal" id="learningDialog" role="dialog" aria-modal="true" aria-labelledby="learningDialogTitle" tabindex="-1">
         <div class="modal-header">
           <div>
-            <p class="eyebrow">Correction guidée V12</p>
-            <h2>${escapeHtml(draft.dishName)}</h2>
+            <p class="eyebrow">Correction guidée</p>
+            <h2 id="learningDialogTitle">${escapeHtml(draft.dishName)}</h2>
             <p class="muted">Sélectionne la composition réelle du plat. Cette mémoire passera avant les estimations automatiques aux prochains scans.</p>
           </div>
           <button class="icon-button" data-action="learning-close" aria-label="Fermer">×</button>
@@ -1785,7 +1833,7 @@ function renderResultCard(result: AnalysisResult): string {
           ${result.menuItem.section ? `<span class="section-pill">${escapeHtml(result.menuItem.section)}</span>` : ''}
           ${result.menuItem.description ? `<p class="muted">${escapeHtml(result.menuItem.description)}</p>` : ''}
         </div>
-        <div class="confidence"><strong>${result.score}</strong><span>/100</span><small>${confidenceLabel(result.confidence)}</small></div>
+        <div class="confidence"><strong>${confidenceLabel(result.confidence)}</strong><small>niveau de confiance</small></div>
       </div>
 
       <div class="result__meta">
@@ -1814,7 +1862,7 @@ function renderResultCard(result: AnalysisResult): string {
 
       <div class="result__actions">
         <button class="ghost" data-action="learn-dish" data-item-id="${result.menuItem.id}">Corriger / apprendre</button>
-        <button class="ghost" data-action="share-dish-public" data-item-id="${result.menuItem.id}">Partager public</button>
+        <button class="ghost" data-action="share-dish-public" data-item-id="${result.menuItem.id}">Préparer le partage</button>
         <button class="ghost" data-action="off-lookup" data-item-id="${result.menuItem.id}">Chercher source produit</button>
         <button class="ghost" data-action="copy-questions" data-item-id="${result.menuItem.id}">Copier questions</button>
       </div>
@@ -1853,7 +1901,7 @@ function renderGroupRowCard(row: GroupAnalysisRow): string {
       ` : ''}
       <div class="result__actions">
         <button class="ghost" data-action="learn-dish" data-item-id="${row.menuItem.id}">Corriger / apprendre</button>
-        <button class="ghost" data-action="share-dish-public" data-item-id="${row.menuItem.id}">Partager public</button>
+        <button class="ghost" data-action="share-dish-public" data-item-id="${row.menuItem.id}">Préparer le partage</button>
         <button class="ghost" data-action="copy-group-questions" data-item-id="${row.menuItem.id}">Copier questions groupe</button>
       </div>
     </article>
@@ -1876,7 +1924,7 @@ function renderEmptyResults(): string {
   return `
     <div class="empty">
       <strong>Commence avec un exemple ou une photo de menu.</strong>
-      <span>La V12 peut analyser un profil solo ou un groupe complet selon les règles alimentaires, religieuses, allergies et intolérances.</span>
+      <span>L’application peut analyser un profil seul ou un groupe complet selon les règles alimentaires, allergies et intolérances.</span>
     </div>
   `;
 }
@@ -1975,20 +2023,24 @@ function buildGroupStats(rows: GroupAnalysisRow[]) {
 function syncActiveProfileFromDom() {
   const active = getActiveProfile();
   const nameInput = document.querySelector<HTMLInputElement>('#profileName');
-  if (!nameInput) return;
   const strictnessSelect = document.querySelector<HTMLSelectElement>('#strictness');
   const forbiddenInput = document.querySelector<HTMLInputElement>('#forbiddenTerms');
   const cautionInput = document.querySelector<HTMLInputElement>('#cautionTerms');
+  const hasRuleControls = Boolean(document.querySelector('input[data-kind="rule"]'));
+  const hasAllergenControls = Boolean(document.querySelector('input[data-kind="allergen"]'));
+  const hasIntoleranceControls = Boolean(document.querySelector('input[data-kind="intolerance"]'));
+
+  if (!nameInput && !strictnessSelect && !forbiddenInput && !cautionInput && !hasRuleControls && !hasAllergenControls && !hasIntoleranceControls) return;
 
   const updated: UserProfile = {
     ...active,
-    name: nameInput?.value.trim() || DEFAULT_PROFILE.name,
+    name: nameInput ? (nameInput.value.trim() || DEFAULT_PROFILE.name) : active.name,
     strictness: (strictnessSelect?.value as Strictness) || active.strictness,
-    rules: getCheckedValues<RuleId>('rule', rules),
-    allergens: getCheckedValues<AllergenId>('allergen', allergens),
-    intolerances: getCheckedValues<AllergenId>('intolerance', allergens),
-    customForbiddenTerms: splitTerms(forbiddenInput?.value ?? ''),
-    customCautionTerms: splitTerms(cautionInput?.value ?? ''),
+    rules: hasRuleControls ? getCheckedValues<RuleId>('rule', rules) : active.rules,
+    allergens: hasAllergenControls ? getCheckedValues<AllergenId>('allergen', allergens) : active.allergens,
+    intolerances: hasIntoleranceControls ? getCheckedValues<AllergenId>('intolerance', allergens) : active.intolerances,
+    customForbiddenTerms: forbiddenInput ? splitTerms(forbiddenInput.value) : active.customForbiddenTerms,
+    customCautionTerms: cautionInput ? splitTerms(cautionInput.value) : active.customCautionTerms,
   };
 
   profiles = profiles.map((profile) => profile.id === updated.id ? updated : profile);
@@ -2008,6 +2060,10 @@ function splitTerms(value: string): string[] {
     .split(',')
     .map((term) => term.trim())
     .filter(Boolean);
+}
+
+function confirmDestructive(message: string): boolean {
+  return window.confirm(message);
 }
 
 function analyzeCurrentMenu(source: ScanRecord['source'] = activeSource) {
@@ -2048,6 +2104,12 @@ function analyzeCurrentMenu(source: ScanRecord['source'] = activeSource) {
 }
 
 async function refreshBackendStatus(showRender = true) {
+  if (!backendConfigured) {
+    backendHealth = null;
+    backendStatus = 'Données conservées sur cet appareil';
+    if (showRender) render();
+    return;
+  }
   const health = await pingBackend();
   backendHealth = health;
   backendStatus = health?.ok
@@ -2057,6 +2119,11 @@ async function refreshBackendStatus(showRender = true) {
 }
 
 async function syncLearningWithBackend() {
+  if (!backendConfigured) {
+    syncStatus = 'Aucun service de synchronisation n’est configuré. Les corrections restent sur cet appareil.';
+    render();
+    return;
+  }
   syncStatus = 'Synchronisation avec le backend SQLite…';
   render();
 
@@ -2064,7 +2131,7 @@ async function syncLearningWithBackend() {
   backendHealth = health;
   if (!health?.ok) {
     backendStatus = 'Backend SQLite optionnel hors ligne';
-    syncStatus = 'Backend indisponible. Lance npm run server puis retente la synchronisation.';
+    syncStatus = 'Backend indisponible. Lance pnpm run server puis retente la synchronisation.';
     render();
     return;
   }
@@ -2091,6 +2158,7 @@ async function syncLearningWithBackend() {
 }
 
 async function persistScanToBackend(record: ScanRecord) {
+  if (!backendConfigured) return;
   const saved = await pushScanRecord(record);
   if (!saved) return;
   backendHealth = await pingBackend().catch(() => backendHealth);
@@ -2317,6 +2385,11 @@ async function saveRestaurantFromDraft() {
 }
 
 async function syncRestaurantsWithBackend() {
+  if (!backendConfigured) {
+    orderPlanStatus = 'Aucun service de synchronisation n’est configuré. Les fiches restent sur cet appareil.';
+    render();
+    return;
+  }
   syncRestaurantDraftFromDom();
   orderPlanStatus = 'Synchronisation restaurants avec le backend SQLite…';
   render();
@@ -2325,7 +2398,7 @@ async function syncRestaurantsWithBackend() {
   backendHealth = health;
   if (!health?.ok) {
     backendStatus = 'Backend SQLite optionnel hors ligne';
-    orderPlanStatus = 'Backend indisponible. Lance npm run server puis retente la synchronisation restaurants.';
+    orderPlanStatus = 'Backend indisponible. Lance pnpm run server puis retente la synchronisation restaurants.';
     render();
     return;
   }
@@ -2475,6 +2548,11 @@ async function copyKnownMenuForRestaurant(id?: string) {
 }
 
 async function fetchRestaurantRemoteSearch() {
+  if (!backendConfigured) {
+    orderPlanStatus = 'La recherche distante n’est pas configurée.';
+    render();
+    return;
+  }
   syncRestaurantDraftFromDom();
   const query = settings.restaurantSearch || restaurantDraft.name;
   const city = settings.restaurantCityFilter || restaurantDraft.city;
@@ -2489,7 +2567,7 @@ async function fetchRestaurantRemoteSearch() {
   backendHealth = health;
   if (!health?.ok) {
     backendStatus = 'Backend SQLite optionnel hors ligne';
-    orderPlanStatus = 'Backend indisponible. Lance npm run server pour chercher dans la base SQLite.';
+    orderPlanStatus = 'Backend indisponible. Lance pnpm run server pour chercher dans la base SQLite.';
     render();
     return;
   }
@@ -2521,7 +2599,7 @@ async function copySafeOrderText(button: HTMLElement, kind: 'plan' | 'script' | 
 
   await navigator.clipboard.writeText(text);
   button.textContent = kind === 'script' ? 'Script copié' : kind === 'questions' ? 'Questions copiées' : kind === 'avoid' ? 'Liste copiée' : 'Plan sûr copié';
-  orderPlanStatus = 'Commande sûre V12 copiée dans le presse-papiers.';
+  orderPlanStatus = 'Plan de commande copié dans le presse-papiers.';
 }
 
 
@@ -2555,7 +2633,7 @@ async function copyServerAssistantText(button: HTMLElement, kind: 'main' | 'comp
       : kind === 'answers'
         ? 'Réanalyse copiée'
         : 'Script copié';
-  serverAssistantStatus = 'Assistant serveur V12 copié dans le presse-papiers.';
+  serverAssistantStatus = 'Script copié dans le presse-papiers.';
 }
 
 function speakServerAssistant() {
@@ -2589,7 +2667,7 @@ function saveServerAssistantAnswersToRecord() {
     ...currentRecord,
     notes: [
       ...(currentRecord.notes ?? []),
-      `Assistant serveur V12 · ${new Date().toLocaleString('fr-FR')}\n${assistant.answerSheet}`,
+      `Assistant serveur · ${new Date().toLocaleString('fr-FR')}\n${assistant.answerSheet}`,
     ],
   };
   saveScanRecord(currentRecord);
@@ -2627,6 +2705,11 @@ function queueCommunityContribution(contribution: PublicDishContribution) {
 }
 
 async function syncCommunityDatabase() {
+  if (!backendConfigured) {
+    communityStatus = 'Aucun service de partage n’est configuré. La file reste locale et peut être exportée en JSON.';
+    render();
+    return;
+  }
   communityStatus = 'Synchronisation de la base communautaire…';
   render();
 
@@ -2634,7 +2717,7 @@ async function syncCommunityDatabase() {
   backendHealth = health;
   if (!health?.ok) {
     backendStatus = 'Backend SQLite optionnel hors ligne';
-    communityStatus = 'Backend indisponible. La file locale reste stockée offline ; lance npm run server pour l’envoyer.';
+    communityStatus = 'Backend indisponible. La file locale reste stockée hors ligne ; lance pnpm run server pour l’envoyer.';
     render();
     return;
   }
@@ -2665,6 +2748,11 @@ async function syncCommunityDatabase() {
 }
 
 async function fetchPublicDatabaseToCache() {
+  if (!backendConfigured) {
+    communityStatus = 'Aucune base publique distante n’est configurée.';
+    render();
+    return;
+  }
   communityStatus = 'Téléchargement de la base publique depuis le backend…';
   render();
   const publicDb = await fetchPublicDatabase();
@@ -2729,6 +2817,11 @@ function searchCommunityCache(query: string) {
 
 
 async function loadModerationQueue() {
+  if (!backendConfigured) {
+    moderationStatus = 'La modération distante nécessite un service configuré.';
+    render();
+    return;
+  }
   moderationStatus = 'Chargement des contributions depuis le backend…';
   render();
 
@@ -3185,6 +3278,7 @@ app.addEventListener('click', async (event) => {
   if (action === 'delete-profile') {
     const active = getActiveProfile();
     if (profiles.length <= 1) return;
+    if (!confirmDestructive(`Supprimer définitivement le profil “${active.name}” ?`)) return;
     profiles = profiles.filter((profile) => profile.id !== active.id);
     settings.activeProfileId = profiles[0]?.id ?? DEFAULT_SETTINGS.activeProfileId;
     settings.enabledProfileIds = settings.enabledProfileIds.filter((id) => id !== active.id);
@@ -3196,6 +3290,7 @@ app.addEventListener('click', async (event) => {
   }
 
   if (action === 'reset-profiles') {
+    if (!confirmDestructive('Réinitialiser tous les profils et effacer les résultats en cours ?')) return;
     profiles = resetAllProfiles();
     settings = normalizeSettings(DEFAULT_SETTINGS);
     results = [];
@@ -3208,6 +3303,7 @@ app.addEventListener('click', async (event) => {
   }
 
   if (action === 'clear-results') {
+    if (!confirmDestructive('Effacer les résultats de l’analyse en cours ?')) return;
     results = [];
     groupRows = [];
     offLookups = {};
@@ -3217,6 +3313,7 @@ app.addEventListener('click', async (event) => {
   }
 
   if (action === 'clear-history') {
+    if (!confirmDestructive('Effacer tout l’historique des scans sur cet appareil ?')) return;
     clearHistory();
     history = [];
     render();
@@ -3227,7 +3324,7 @@ app.addEventListener('click', async (event) => {
     syncStatus = 'Test du backend local…';
     render();
     await refreshBackendStatus(false);
-    syncStatus = backendHealth?.ok ? 'Backend SQLite joignable.' : 'Backend hors ligne. Lance npm run server pour activer SQLite.';
+    syncStatus = backendHealth?.ok ? 'Backend SQLite joignable.' : 'Backend hors ligne. Lance pnpm run server pour activer SQLite.';
     render();
     return;
   }
@@ -3307,6 +3404,8 @@ app.addEventListener('click', async (event) => {
   if (action === 'forget-restaurant') {
     const id = button.dataset.restaurantId;
     if (!id) return;
+    const restaurant = findRestaurantCandidateById(id);
+    if (!confirmDestructive(`Oublier la fiche “${restaurant?.name ?? 'ce restaurant'}” sur cet appareil ?`)) return;
     restaurantMemories = removeRestaurantMemory(id);
     if (activeRestaurantId === id) {
       activeRestaurantId = '';
@@ -3373,6 +3472,7 @@ app.addEventListener('click', async (event) => {
   }
 
   if (action === 'reset-server-answers') {
+    if (!confirmDestructive('Effacer toutes les réponses notées pour cet échange ?')) return;
     serverAnswers = {};
     serverAssistantStatus = 'Réponses serveur réinitialisées.';
     render();
@@ -3411,6 +3511,7 @@ app.addEventListener('click', async (event) => {
   }
 
   if (action === 'community-clear-queue') {
+    if (!confirmDestructive('Vider toute la file locale de corrections préparées ?')) return;
     clearLocalCommunityQueue();
     return;
   }
@@ -3517,6 +3618,7 @@ app.addEventListener('click', async (event) => {
   }
 
   if (action === 'learning-clear') {
+    if (!confirmDestructive('Retirer tous les ingrédients sélectionnés de cette correction ?')) return;
     clearLearningIngredients();
     return;
   }
@@ -3529,6 +3631,8 @@ app.addEventListener('click', async (event) => {
   if (action === 'forget-learned-dish') {
     const id = button.dataset.learnedId;
     if (!id) return;
+    const learnedDish = learnedDishes.find((item) => item.id === id);
+    if (!confirmDestructive(`Oublier la correction “${learnedDish?.name ?? 'ce plat'}” ?`)) return;
     removeLearnedDish(id);
     learnedDishes = getLearnedDishes();
     syncStatus = 'Correction oubliée localement.';
@@ -3687,6 +3791,17 @@ app.addEventListener('change', async (event) => {
     return;
   }
 
+  if (target.matches('select[data-action="server-answer-select"]') && target instanceof HTMLSelectElement) {
+    const questionId = target.dataset.questionId;
+    const answer = target.value as ServerAnswerValue;
+    if (!questionId) return;
+    if (answer === 'unanswered') delete serverAnswers[questionId];
+    else serverAnswers[questionId] = answer;
+    serverAssistantStatus = `Réponse serveur notée : ${answerValueLabel(answer)}.`;
+    render();
+    return;
+  }
+
   if (target.id === 'serverAssistantLanguage' && target instanceof HTMLSelectElement) {
     serverAssistantLanguage = target.value as ServerAssistantLanguage;
     serverAssistantStatus = 'Langue de l’assistant serveur mise à jour.';
@@ -3797,10 +3912,38 @@ app.addEventListener('input', (event) => {
   }
 });
 
+window.addEventListener('keydown', (event) => {
+  if (!learningDraft) return;
+  if (event.key === 'Escape') {
+    learningDraft = null;
+    render();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+
+  const dialog = document.querySelector<HTMLElement>('#learningDialog');
+  if (!dialog) return;
+  const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'));
+  if (!focusable.length) {
+    event.preventDefault();
+    dialog.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
+
 window.addEventListener('hashchange', () => {
   window.scrollTo({ top: 0, behavior: 'auto' });
   render();
 });
 
 render();
-void refreshBackendStatus(true);
+if (backendConfigured) void refreshBackendStatus(true);

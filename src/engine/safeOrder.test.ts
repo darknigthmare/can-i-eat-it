@@ -58,4 +58,16 @@ describe('safeOrder', () => {
     expect(plan.shortText).toContain('commande sûre');
     expect(plan.serverScript).toContain('Pouvez-vous');
   });
+
+  it('ne propose pas une modification sans gluten si le profil ne la demande pas', () => {
+    const plan = buildSafeOrderPlan({
+      mode: 'single',
+      activeProfile: profile,
+      enabledProfiles: [profile],
+      results: [result('Falafel pané', 'caution', 52, ['gluten_ble'])],
+      groupRows: [],
+    });
+
+    expect(plan.conditionalChoices[0].modifications.some((modification) => modification.label.includes('farine'))).toBe(false);
+  });
 });

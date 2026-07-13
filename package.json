@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Can I Eat It V12 - advanced OCR, foreign menu translation, dietary compatibility, safe order mode, restaurant intelligence, community database, moderation, and multilingual server assistant.",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc && vite build",
@@ -20,14 +23,13 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "server": "node server/server.mjs",
-    "dev:full": "node server/server.mjs & vite --host 0.0.0.0"
+    "dev:full": "node server/dev.mjs"
   },
   "dependencies": {
     "@capacitor/core": "^8.4.0",
     "@tauri-apps/api": "^2.11.1",
     "tesseract.js": "^7.0.0",
-    "@capacitor/camera": "^8.0.0",
-    "better-sqlite3": "^12.2.0"
+    "@capacitor/camera": "^8.0.0"
   },
   "devDependencies": {
     "@capacitor/android": "^8.4.0",
