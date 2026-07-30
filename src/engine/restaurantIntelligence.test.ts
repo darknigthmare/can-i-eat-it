@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { PROFILE_TEMPLATES, cloneProfile } from '../data/profiles';
+import { cloneProfile } from '../data/profiles';
+import { DEFAULT_PROFILE } from '../data/rules';
 import type { LearnedDish, PublicDatabaseExport, RestaurantMemory } from '../types';
 import { buildKnownMenuText, buildKnownRestaurantDishes, searchRestaurantInsights } from './restaurantIntelligence';
 
-const profile = cloneProfile(PROFILE_TEMPLATES[0]);
+const profile = cloneProfile(DEFAULT_PROFILE);
 const restaurant: RestaurantMemory = {
   id: 'r1',
   name: 'Tacos Test',

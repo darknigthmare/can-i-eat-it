@@ -1,5 +1,5 @@
-import { cloneProfile, PROFILE_TEMPLATES } from '../data/profiles';
-import { DEFAULT_PROFILE } from '../data/rules';
+import { cloneProfile } from '../data/profiles';
+import { DEFAULT_PROFILE, RULE_LABELS } from '../data/rules';
 import type { AppSettings, PublicDatabaseExport, PublicDishContribution, RestaurantMemory, ScanRecord, UserProfile } from '../types';
 
 const PROFILE_KEY = 'can-i-eat-it:profile';
@@ -10,11 +10,12 @@ const RESTAURANTS_KEY = 'can-i-eat-it:restaurants:v5';
 const ACTIVE_RESTAURANT_KEY = 'can-i-eat-it:active-restaurant:v5';
 const COMMUNITY_QUEUE_KEY = 'can-i-eat-it:community-queue:v7';
 const PUBLIC_DB_CACHE_KEY = 'can-i-eat-it:public-db-cache:v7';
+const ONBOARDING_KEY = 'can-i-eat-it:onboarding:v1';
 
 export const DEFAULT_SETTINGS: AppSettings = {
   mode: 'single',
-  activeProfileId: DEFAULT_PROFILE.id ?? 'profile-halal-veg-lactose',
-  enabledProfileIds: [DEFAULT_PROFILE.id ?? 'profile-halal-veg-lactose'],
+  activeProfileId: DEFAULT_PROFILE.id ?? 'profile-default',
+  enabledProfileIds: [DEFAULT_PROFILE.id ?? 'profile-default'],
   riskFirst: false,
   statusFilter: 'all',
   resultSearch: '',
@@ -59,15 +60,15 @@ export function loadProfiles(): UserProfile[] {
   if (legacy) {
     try {
       const parsed = migrateProfile(JSON.parse(legacy) as UserProfile);
-      const seeded = [parsed, ...PROFILE_TEMPLATES.filter((template) => template.id !== parsed.id).map(cloneProfile)];
-      saveProfiles(seeded);
-      return seeded;
+      const migrated = [parsed];
+      saveProfiles(migrated);
+      return migrated;
     } catch {
       // ignore and fallback
     }
   }
 
-  const defaults = PROFILE_TEMPLATES.map(cloneProfile);
+  const defaults = [cloneProfile(DEFAULT_PROFILE)];
   saveProfiles(defaults);
   return defaults;
 }
@@ -254,10 +255,29 @@ export function resetProfile(): UserProfile {
 }
 
 export function resetAllProfiles(): UserProfile[] {
-  const profiles = PROFILE_TEMPLATES.map(cloneProfile);
+  const profiles = [cloneProfile(DEFAULT_PROFILE)];
   saveProfiles(profiles);
   saveSettings(DEFAULT_SETTINGS);
   return profiles;
+}
+
+export function shouldShowOnboarding(): boolean {
+  const state = localStorage.getItem(ONBOARDING_KEY);
+  if (state === 'done') return false;
+  if (state === 'pending') return true;
+
+  const hasExistingProfiles = Boolean(localStorage.getItem(PROFILES_KEY) || localStorage.getItem(PROFILE_KEY));
+  localStorage.setItem(ONBOARDING_KEY, hasExistingProfiles ? 'done' : 'pending');
+  return !hasExistingProfiles;
+}
+
+export function completeOnboarding(): void {
+  localStorage.setItem(ONBOARDING_KEY, 'done');
+}
+
+export function clearAllLocalData(): void {
+  const keys = Object.keys(localStorage).filter((key) => key.startsWith('can-i-eat-it:'));
+  for (const key of keys) localStorage.removeItem(key);
 }
 
 
@@ -329,7 +349,9 @@ function migrateProfile(profile: UserProfile): UserProfile {
     ...cloneProfile(DEFAULT_PROFILE),
     ...profile,
     id: profile.id ?? `profile-${Math.random().toString(16).slice(2)}`,
-    rules: Array.isArray(profile.rules) ? profile.rules : [],
+    rules: Array.isArray(profile.rules)
+      ? profile.rules.filter((rule) => Object.prototype.hasOwnProperty.call(RULE_LABELS, rule))
+      : [],
     allergens: Array.isArray(profile.allergens) ? profile.allergens : [],
     intolerances: Array.isArray(profile.intolerances) ? profile.intolerances : [],
     customForbiddenTerms: Array.isArray(profile.customForbiddenTerms) ? profile.customForbiddenTerms : [],

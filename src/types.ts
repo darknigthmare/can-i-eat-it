@@ -22,8 +22,7 @@ export type RuleId =
   | 'christian_lent'
   | 'hindu_no_beef'
   | 'low_lactose'
-  | 'gluten_free'
-  | 'custom_strict';
+  | 'gluten_free';
 
 export type Strictness = 'relaxed' | 'normal' | 'strict';
 

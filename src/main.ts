@@ -1,6 +1,6 @@
 import './styles.css';
 import { SAMPLE_MENUS } from './data/dishes';
-import { EU_MAJOR_ALLERGENS, INGREDIENTS } from './data/ingredients';
+import { EU_MAJOR_ALLERGENS } from './data/ingredients';
 import { DEFAULT_PROFILE, RULE_DESCRIPTIONS, RULE_LABELS, STRICTNESS_LABELS } from './data/rules';
 import { analyzeMenuForGroup, analyzeMenuItems, sortGroupRowsByRisk, sortResultsByRisk } from './engine/compatibility';
 import { captureMenuPhoto, isNativeCameraAvailable } from './engine/camera';
@@ -19,8 +19,10 @@ import { autoCorrectOcrMenuText, buildOcrAdvancedReport, buildOcrZoneDraft, merg
 import { applyMenuTranslationToText, buildMenuTranslationReport, menuTranslationLanguageLabel, supportedMenuTranslationLanguages, type MenuTranslationLanguage, type MenuTranslationReport } from './engine/menuTranslation';
 import { registerServiceWorker } from './engine/pwa';
 import {
+  clearAllLocalData,
   clearCommunityQueue,
   clearHistory,
+  completeOnboarding,
   DEFAULT_SETTINGS,
   enqueueCommunityContribution,
   importRestaurants,
@@ -40,6 +42,7 @@ import {
   saveProfiles,
   saveScanRecord,
   saveSettings,
+  shouldShowOnboarding,
   updateCommunityContribution,
   upsertRestaurantMemory,
 } from './engine/storage';
@@ -83,13 +86,16 @@ const LEARNING_PACKS: { id: string; label: string; ingredientIds: string[] }[] =
 ];
 
 const rules = Object.keys(RULE_LABELS) as RuleId[];
+const dietRules = rules;
 const allergens = EU_MAJOR_ALLERGENS.map((item) => item.id);
 
+let onboardingRequired = shouldShowOnboarding();
+let onboardingStep = 0;
 let profiles: UserProfile[] = loadProfiles();
 let settings: AppSettings = normalizeSettings(loadSettings());
 let history = loadHistory();
 let currentRecord: ScanRecord | null = history[0] ?? null;
-let menuText = currentRecord?.rawText ?? SAMPLE_MENUS[0].text;
+let menuText = currentRecord?.rawText ?? '';
 let results: AnalysisResult[] = currentRecord?.results ?? [];
 let groupRows: GroupAnalysisRow[] = currentRecord?.groupRows ?? [];
 let imagePreview = '';
@@ -101,7 +107,7 @@ let ocrZoneDraft = '';
 let translationReport: MenuTranslationReport | null = null;
 let translationSourceLanguage: MenuTranslationLanguage = 'auto';
 let translationStatus = '';
-let activeSource: ScanRecord['source'] = currentRecord?.source ?? 'sample';
+let activeSource: ScanRecord['source'] = currentRecord?.source ?? 'manual';
 let offLookups: Record<string, string> = {};
 let learnedDishes: LearnedDish[] = getLearnedDishes();
 let restaurantMemories: RestaurantMemory[] = loadRestaurants();
@@ -132,7 +138,7 @@ let serverAnswers: ServerAnswerMap = {};
 let serverAssistantStatus = '';
 
 type AppView = 'scanner' | 'results' | 'restaurants' | 'community' | 'profile';
-type ProfileTab = 'identity' | 'diet' | 'allergies' | 'personal' | 'history' | 'privacy';
+type ProfileTab = 'identity' | 'diet' | 'allergies' | 'intolerances' | 'personal' | 'corrections' | 'history' | 'privacy';
 
 const APP_VIEWS: { id: AppView; label: string; title: string; description: string }[] = [
   { id: 'scanner', label: 'Scanner', title: 'Scanner un menu', description: 'Prends une photo ou colle le texte du menu, puis lance l’analyse.' },
@@ -154,6 +160,11 @@ function escapeHtml(value: string): string {
 }
 
 function render() {
+  if (onboardingRequired) {
+    renderOnboarding();
+    return;
+  }
+
   const activeProfile = getActiveProfile();
   const displayedResults = filterResults(settings.riskFirst ? sortResultsByRisk(results) : results);
   const displayedGroupRows = filterGroupRows(settings.riskFirst ? sortGroupRowsByRisk(groupRows) : groupRows);
@@ -208,6 +219,66 @@ function render() {
   }
 }
 
+function renderOnboarding(): void {
+  const profile = getActiveProfile();
+  const steps = ['Profil', 'Alimentation', 'Allergies', 'Intolérances'];
+  const stepContent = [
+    `
+      <div class="onboarding-copy">
+        <p class="eyebrow">Bienvenue</p>
+        <h1>Configure ton profil alimentaire</h1>
+        <p>Ces informations servent à classer les plats. Tu pourras les modifier à tout moment.</p>
+      </div>
+      <label class="field"><span>Nom du profil</span><input id="profileName" type="text" value="${escapeHtml(profile.name)}" autocomplete="name" /></label>
+      <label class="field">
+        <span>Niveau de prudence</span>
+        <select id="strictness">
+          ${(['relaxed', 'normal', 'strict'] as Strictness[]).map((level) => `<option value="${level}" ${profile.strictness === level ? 'selected' : ''}>${STRICTNESS_LABELS[level]}</option>`).join('')}
+        </select>
+      </label>
+      <div class="notice"><strong>Allergie sévère</strong><span>Le restaurant reste la source à confirmer avant de commander.</span></div>
+    `,
+    `
+      <div class="onboarding-copy"><p class="eyebrow">Alimentation</p><h1>Quelles règles appliquer ?</h1><p>Sélectionne uniquement celles qui changent réellement tes choix.</p></div>
+      <div class="check-grid check-grid--compact">
+        ${dietRules.map((rule) => renderCheckbox('rule', rule, RULE_LABELS[rule], profile.rules.includes(rule), RULE_DESCRIPTIONS[rule], false)).join('')}
+      </div>
+    `,
+    `
+      <div class="onboarding-copy"><p class="eyebrow">Sécurité</p><h1>As-tu des allergies ?</h1><p>Une allergie détectée bloque le plat.</p></div>
+      <div class="check-grid check-grid--compact">
+        ${EU_MAJOR_ALLERGENS.map((allergen) => renderCheckbox('allergen', allergen.id, allergen.label, profile.allergens.includes(allergen.id), allergen.examples, false)).join('')}
+      </div>
+    `,
+    `
+      <div class="onboarding-copy"><p class="eyebrow">Sensibilités</p><h1>As-tu des intolérances ?</h1><p>Elles déclenchent une vérification adaptée au niveau de prudence.</p></div>
+      <div class="check-grid check-grid--compact">
+        ${EU_MAJOR_ALLERGENS.map((allergen) => renderCheckbox('intolerance', allergen.id, allergen.label, profile.intolerances.includes(allergen.id), allergen.examples, false)).join('')}
+      </div>
+    `,
+  ][onboardingStep];
+
+  app.innerHTML = `
+    <div class="onboarding-shell">
+      <header class="onboarding-header">
+        <span class="brand">
+          <span class="brand__mark">CIEI</span>
+          <span><strong>Can I Eat It</strong><small>Configuration initiale</small></span>
+        </span>
+        <span class="onboarding-step">Étape ${onboardingStep + 1} sur ${steps.length} · ${steps[onboardingStep]}</span>
+      </header>
+      <main class="onboarding-main">
+        <div class="onboarding-progress" aria-hidden="true"><span style="width:${((onboardingStep + 1) / steps.length) * 100}%"></span></div>
+        <section class="onboarding-panel">${stepContent}</section>
+        <div class="onboarding-actions">
+          ${onboardingStep ? '<button class="ghost" data-action="onboarding-back">Retour</button>' : '<button class="ghost" data-action="onboarding-skip">Continuer sans restriction</button>'}
+          <button class="primary" data-action="${onboardingStep === steps.length - 1 ? 'onboarding-finish' : 'onboarding-next'}">${onboardingStep === steps.length - 1 ? 'Terminer' : 'Continuer'}</button>
+        </div>
+      </main>
+    </div>
+  `;
+}
+
 function getAppView(): AppView {
   const requested = window.location.hash.replace(/^#\/?/, '').split('/')[0] as AppView;
   return APP_VIEWS.some((item) => item.id === requested) ? requested : 'scanner';
@@ -226,8 +297,7 @@ function navigateToView(view: AppView): void {
 function renderNavigation(activeView: AppView, compact = false): string {
   return APP_VIEWS.map((item) => `
     <a href="#/${item.id}" class="nav-link ${item.id === activeView ? 'nav-link--active' : ''}" ${item.id === activeView ? 'aria-current="page"' : ''}>
-      <span>${escapeHtml(compact && item.id === 'community' ? 'Base' : item.label)}</span>
-      ${item.id === 'results' && currentRecord ? '<em>1</em>' : ''}
+      <span>${escapeHtml(compact && item.id === 'restaurants' ? 'Adresses' : item.label)}</span>
     </a>
   `).join('');
 }
@@ -324,11 +394,11 @@ function renderScannerScreen(activeProfile: UserProfile): string {
     </div>
 
     <section class="scan-tools" aria-label="Outils de lecture du menu">
-      <details class="tool-drawer">
+      <details class="tool-drawer" ${ocrReport ? 'open' : ''}>
         <summary><span><strong>Outils OCR avancés</strong><small>Nettoyer une photo difficile ou isoler une zone douteuse.</small></span><em>Ouvrir</em></summary>
         ${renderAdvancedOcrPanel()}
       </details>
-      <details class="tool-drawer">
+      <details class="tool-drawer" ${translationReport ? 'open' : ''}>
         <summary><span><strong>Traduire un menu étranger</strong><small>Détecter la langue et enrichir les ingrédients avant l’analyse.</small></span><em>Ouvrir</em></summary>
         ${renderMenuTranslationPanel()}
       </details>
@@ -379,7 +449,7 @@ function getResultsTab(): 'summary' | 'dishes' | 'assistant' {
 
 function renderResultsPanel(displayedResults: AnalysisResult[], displayedGroupRows: GroupAnalysisRow[]): string {
   return `
-    <section class="card results-card">
+    <section class="results-panel">
       <div class="card__header card__header--wrap">
         <div>
           <p class="eyebrow">Analyse détaillée</p>
@@ -388,11 +458,16 @@ function renderResultsPanel(displayedResults: AnalysisResult[], displayedGroupRo
         <div class="toolbar">
           <select id="statusFilter" aria-label="Filtrer par statut">${renderStatusOptions(settings.statusFilter)}</select>
           <input id="resultSearch" type="search" value="${escapeHtml(settings.resultSearch)}" placeholder="Rechercher un plat…" />
-          <button class="ghost" data-action="copy-question-sheet">Copier les questions</button>
-          <button class="ghost" data-action="export-json">Exporter</button>
-          <button class="ghost" data-action="clear-results">Vider</button>
         </div>
       </div>
+      <details class="compact-action-drawer">
+        <summary>Exporter ou recommencer</summary>
+        <div class="actions">
+          <button class="ghost" data-action="copy-question-sheet">Copier les questions</button>
+          <button class="ghost" data-action="export-json">Exporter l’analyse</button>
+          <button class="ghost danger-action" data-action="clear-results">Nouvelle analyse</button>
+        </div>
+      </details>
       ${settings.mode === 'group'
         ? (displayedGroupRows.length ? `<div class="group-list">${displayedGroupRows.map(renderGroupRowCard).join('')}</div>` : renderEmptyResults())
         : (displayedResults.length ? `<div class="result-list">${displayedResults.map(renderResultCard).join('')}</div>` : renderEmptyResults())}
@@ -401,35 +476,18 @@ function renderResultsPanel(displayedResults: AnalysisResult[], displayedGroupRo
 }
 
 function renderProfileScreen(activeProfile: UserProfile): string {
-  const restrictionCount = activeProfile.rules.length + activeProfile.allergens.length + activeProfile.intolerances.length;
   const activeTab = getProfileTab();
   return `
     ${renderProfileTabs(activeTab)}
-    <div class="profile-layout profile-layout--focused">
-      <section class="card profile-card profile-editor-card" aria-labelledby="profile-panel-title">
-        ${renderProfileTabContent(activeTab, activeProfile)}
-      </section>
-      <aside class="profile-aside">
-        <section class="card profile-overview">
-          <div class="profile-overview__identity">
-            <span class="profile-overview__avatar">${escapeHtml(profileInitial(activeProfile))}</span>
-            <div><p class="eyebrow">Profil actif</p><h2>${escapeHtml(activeProfile.name)}</h2></div>
-          </div>
-          <div class="profile-overview__stats">
-            <div><strong>${restrictionCount}</strong><span>règles actives</span></div>
-            <div><strong>${activeProfile.strictness === 'strict' ? 'Strict' : activeProfile.strictness === 'relaxed' ? 'Souple' : 'Normal'}</strong><span>prudence</span></div>
-            <div><strong>${history.length}</strong><span>scans enregistrés</span></div>
-          </div>
-        </section>
-        ${activeTab === 'identity' ? renderAnalysisModeCard() : ''}
-      </aside>
-    </div>
+    <section class="profile-panel profile-editor-card" aria-labelledby="profile-panel-title">
+      ${renderProfileTabContent(activeTab, activeProfile)}
+    </section>
   `;
 }
 
 function getProfileTab(): ProfileTab {
   const tab = window.location.hash.replace(/^#\/?/, '').split('/')[1] as ProfileTab;
-  return ['identity', 'diet', 'allergies', 'personal', 'history', 'privacy'].includes(tab) ? tab : 'identity';
+  return ['identity', 'diet', 'allergies', 'intolerances', 'personal', 'corrections', 'history', 'privacy'].includes(tab) ? tab : 'identity';
 }
 
 function renderProfileTabs(activeTab: ProfileTab): string {
@@ -437,9 +495,11 @@ function renderProfileTabs(activeTab: ProfileTab): string {
     ['identity', 'Identité'],
     ['diet', 'Alimentation'],
     ['allergies', 'Allergies'],
-    ['personal', 'Personnalisation'],
+    ['intolerances', 'Intolérances'],
+    ['personal', 'Termes'],
+    ['corrections', 'Corrections'],
     ['history', 'Historique'],
-    ['privacy', 'Confidentialité'],
+    ['privacy', 'Données'],
   ];
   return `
     <nav class="section-tabs profile-tabs" aria-label="Sections du profil">
@@ -453,28 +513,33 @@ function renderProfileTabContent(tab: ProfileTab, profile: UserProfile): string 
     return `
       <div class="card__header"><div><p class="eyebrow">Alimentation</p><h2 id="profile-panel-title">Règles alimentaires</h2></div></div>
       <p class="muted">Active uniquement les règles qui doivent réellement modifier les recommandations.</p>
-      <div class="check-grid">
-        ${rules.map((rule) => renderCheckbox('rule', rule, RULE_LABELS[rule], profile.rules.includes(rule), RULE_DESCRIPTIONS[rule])).join('')}
+      <div class="check-grid check-grid--compact">
+        ${dietRules.map((rule) => renderCheckbox('rule', rule, RULE_LABELS[rule], profile.rules.includes(rule), RULE_DESCRIPTIONS[rule], false)).join('')}
       </div>
     `;
   }
   if (tab === 'allergies') {
     return `
-      <div class="card__header"><div><p class="eyebrow">Sécurité</p><h2 id="profile-panel-title">Allergies et intolérances</h2></div></div>
-      <p class="muted">Une allergie est traitée plus strictement qu’une intolérance. En cas de doute, confirme toujours avec le restaurant.</p>
-      <h3>Allergies déclarées</h3>
-      <div class="check-grid">
-        ${EU_MAJOR_ALLERGENS.map((allergen) => renderCheckbox('allergen', allergen.id, allergen.label, profile.allergens.includes(allergen.id), allergen.examples)).join('')}
+      <div class="card__header"><div><p class="eyebrow">Sécurité</p><h2 id="profile-panel-title">Allergies déclarées</h2></div></div>
+      <p class="muted">Une allergie détectée bloque le plat. Confirme toujours la composition et la contamination croisée avec le restaurant.</p>
+      <div class="check-grid check-grid--compact">
+        ${EU_MAJOR_ALLERGENS.map((allergen) => renderCheckbox('allergen', allergen.id, allergen.label, profile.allergens.includes(allergen.id), allergen.examples, false)).join('')}
       </div>
-      <h3>Intolérances et sensibilités</h3>
-      <div class="check-grid">
-        ${EU_MAJOR_ALLERGENS.map((allergen) => renderCheckbox('intolerance', allergen.id, allergen.label, profile.intolerances.includes(allergen.id), allergen.examples)).join('')}
+    `;
+  }
+  if (tab === 'intolerances') {
+    return `
+      <div class="card__header"><div><p class="eyebrow">Sensibilités</p><h2 id="profile-panel-title">Intolérances</h2></div></div>
+      <p class="muted">Elles déclenchent une alerte adaptée au niveau de prudence du profil.</p>
+      <div class="check-grid check-grid--compact">
+        ${EU_MAJOR_ALLERGENS.map((allergen) => renderCheckbox('intolerance', allergen.id, allergen.label, profile.intolerances.includes(allergen.id), allergen.examples, false)).join('')}
       </div>
     `;
   }
   if (tab === 'personal') {
     return `
-      <div class="card__header"><div><p class="eyebrow">Personnalisation</p><h2 id="profile-panel-title">Termes et corrections</h2></div></div>
+      <div class="card__header"><div><p class="eyebrow">Personnalisation</p><h2 id="profile-panel-title">Termes personnels</h2></div></div>
+      <p class="muted">Ces termes sont appliqués automatiquement à chaque analyse.</p>
       <label class="field">
         <span>Termes interdits personnalisés</span>
         <input id="forbiddenTerms" type="text" value="${escapeHtml(profile.customForbiddenTerms.join(', '))}" placeholder="porc, alcool, gélatine..." />
@@ -483,9 +548,9 @@ function renderProfileTabContent(tab: ProfileTab, profile: UserProfile): string 
         <span>Termes à vérifier personnalisés</span>
         <input id="cautionTerms" type="text" value="${escapeHtml(profile.customCautionTerms.join(', '))}" placeholder="sauce maison, bouillon..." />
       </label>
-      ${renderMemoryCard(true)}
     `;
   }
+  if (tab === 'corrections') return renderMemoryCard(true);
   if (tab === 'history') return renderHistoryCard(true);
   if (tab === 'privacy') {
     return `
@@ -495,13 +560,17 @@ function renderProfileTabContent(tab: ProfileTab, profile: UserProfile): string 
         <span>Les profils, allergies, historiques et corrections sont enregistrés dans le stockage de ce navigateur. Ils ne sont pas envoyés tant qu’aucun service de synchronisation n’est configuré.</span>
       </div>
       <p class="muted">Toute personne ayant accès à cette session de navigateur peut potentiellement consulter ces données. Évite un appareil partagé pour un profil sensible.</p>
-      <button class="ghost danger-action" data-action="reset-profiles">Réinitialiser profils et résultats</button>
+      <div class="actions">
+        <button class="ghost danger-action" data-action="reset-profiles">Réinitialiser les profils</button>
+        <button class="ghost danger-action" data-action="clear-all-local-data">Effacer toutes les données de l’app</button>
+      </div>
     `;
   }
   return `
     <div class="card__header card__header--wrap">
       <div><p class="eyebrow">Identité</p><h2 id="profile-panel-title">Profil utilisé pour l’analyse</h2></div>
       <div class="actions">
+        <button class="ghost" data-action="new-profile">Nouveau</button>
         <button class="ghost" data-action="duplicate-profile">Dupliquer</button>
         <button class="ghost danger-action" data-action="delete-profile" ${profiles.length <= 1 ? 'disabled' : ''}>Supprimer</button>
       </div>
@@ -519,21 +588,15 @@ function renderProfileTabContent(tab: ProfileTab, profile: UserProfile): string 
         ${(['relaxed', 'normal', 'strict'] as Strictness[]).map((level) => `<option value="${level}" ${profile.strictness === level ? 'selected' : ''}>${STRICTNESS_LABELS[level]}</option>`).join('')}
       </select>
     </label>
-    <div class="notice"><strong>Important</strong><span>L’app aide à décider, mais ne remplace pas la confirmation du restaurant, surtout pour les allergies.</span></div>
-  `;
-}
-
-function renderAnalysisModeCard(): string {
-  return `
-    <section class="card analysis-mode-card">
-      <p class="eyebrow">Mode d’analyse</p>
-      <h2>Solo ou groupe</h2>
+    <div class="profile-mode">
+      <h3>Mode d’analyse</h3>
       <div class="segmented" role="tablist" aria-label="Mode d'analyse">
         <button class="segment ${settings.mode === 'single' ? 'segment--active' : ''}" role="tab" aria-selected="${settings.mode === 'single'}" data-action="set-mode" data-mode="single">Solo</button>
         <button class="segment ${settings.mode === 'group' ? 'segment--active' : ''}" role="tab" aria-selected="${settings.mode === 'group'}" data-action="set-mode" data-mode="group">Groupe</button>
       </div>
-      ${settings.mode === 'group' ? renderGroupProfilePicker() : '<p class="muted">Le prochain scan utilisera uniquement le profil actif.</p>'}
-    </section>
+      ${settings.mode === 'group' ? renderGroupProfilePicker() : ''}
+    </div>
+    <div class="notice"><strong>Important</strong><span>L’app aide à décider, mais ne remplace pas la confirmation du restaurant, surtout pour les allergies.</span></div>
   `;
 }
 
@@ -571,11 +634,6 @@ function renderMemoryCard(embedded = false): string {
 function renderCommunityScreen(): string {
   return `
     <div class="screen-stack">
-      <section class="card knowledge-card">
-        <div class="card__header"><div><p class="eyebrow">Moteur local</p><h2>${INGREDIENTS.length} ingrédients et risques reconnus</h2></div></div>
-        <p class="muted">Porc, alcool, lactose, gluten, fruits de mer, allergènes, gélatine, bouillons, sauces cachées et contamination croisée.</p>
-        <div class="tag-cloud">${INGREDIENTS.slice(0, 24).map((ingredient) => `<span>${escapeHtml(ingredient.names[0])}</span>`).join('')}</div>
-      </section>
       ${renderCommunityPanel()}
       ${moderationEnabled ? `<details class="tool-drawer moderation-drawer">
         <summary><span><strong>Modération et qualité</strong><small>Réservé à la validation des contributions publiques.</small></span><em>Ouvrir</em></summary>
@@ -595,7 +653,7 @@ function renderAdvancedOcrPanel(): string {
   const sections = report?.sections ?? [];
 
   return `
-    <section class="card advanced-ocr-card">
+    <section class="tool-panel advanced-ocr-card">
       <div class="card__header card__header--wrap">
         <div>
           <p class="eyebrow">Outils OCR</p>
@@ -673,7 +731,7 @@ function renderMenuTranslationPanel(): string {
   const cautionHits = report?.glossaryHits.filter((hit) => hit.riskLevel === 'caution') ?? [];
 
   return `
-    <section class="card translation-card">
+    <section class="tool-panel translation-card">
       <div class="card__header card__header--wrap">
         <div>
           <p class="eyebrow">Traduction du menu</p>
@@ -765,10 +823,10 @@ function renderTranslationLine(line: MenuTranslationReport['lineTranslations'][n
 }
 
 function renderOcrIssue(issue: OcrAdvancedReport['issues'][number]): string {
-  const icon = issue.severity === 'blocker' ? '⛔' : issue.severity === 'warning' ? '⚠️' : 'ℹ️';
+  const severity = issue.severity === 'blocker' ? 'Bloquant' : issue.severity === 'warning' ? 'Attention' : 'Information';
   return `
     <article class="ocr-issue ocr-issue--${escapeHtml(issue.severity)}">
-      <div><strong>${icon} ${escapeHtml(issue.message)}</strong>${issue.lineNumber ? `<small>Ligne ${issue.lineNumber}</small>` : ''}</div>
+      <div><span class="severity-label">${severity}</span><strong>${escapeHtml(issue.message)}</strong>${issue.lineNumber ? `<small>Ligne ${issue.lineNumber}</small>` : ''}</div>
       ${issue.lineText ? `<code>${escapeHtml(issue.lineText)}</code>` : ''}
       ${issue.suggestion ? `<small>Suggestion : ${escapeHtml(issue.suggestion)}</small>` : ''}
     </article>
@@ -781,7 +839,7 @@ function renderSafeOrderMode(): string {
 
   if (!plan) {
     return `
-      <section class="card safe-order-card safe-order-card--empty">
+      <section class="safe-order-panel safe-order-card--empty">
         <div class="card__header card__header--wrap">
           <div>
           <p class="eyebrow">Décision</p>
@@ -802,10 +860,8 @@ function renderSafeOrderMode(): string {
 
   const safeChoice = plan.bestChoices[0] ?? null;
   const fallbackChoice = plan.conditionalChoices[0] ?? plan.unknownChoices[0] ?? null;
-  const cautionLabel = plan.conditionalChoices.length + plan.unknownChoices.length;
-
   return `
-    <section class="card safe-order-card safe-order-card--v9">
+    <section class="safe-order-panel safe-order-card--v9">
       <div class="card__header card__header--wrap">
         <div>
           <p class="eyebrow">Décision</p>
@@ -815,17 +871,8 @@ function renderSafeOrderMode(): string {
         </div>
         <div class="toolbar">
           <button class="ghost" data-action="copy-safe-order-plan">Copier le plan</button>
-          <button class="ghost" data-action="copy-safe-order-script">Script serveur</button>
-          <button class="ghost" data-action="copy-safe-order-questions" ${plan.questions.length ? '' : 'disabled'}>Copier questions</button>
-          <button class="ghost" data-action="copy-safe-order-avoid" ${plan.avoidChoices.length ? '' : 'disabled'}>Copier à éviter</button>
+          <a class="ghost ghost-link" href="#/results/assistant">Ouvrir l’assistant serveur</a>
         </div>
-      </div>
-
-      <div class="safe-order-metrics">
-        <div class="safe-order-metric safe-order-metric--safe"><strong>${plan.bestChoices.length}</strong><span>à commander</span></div>
-        <div class="safe-order-metric safe-order-metric--caution"><strong>${cautionLabel}</strong><span>avec vérification</span></div>
-        <div class="safe-order-metric safe-order-metric--blocked"><strong>${plan.avoidChoices.length}</strong><span>à éviter</span></div>
-        <div class="safe-order-metric"><strong>${plan.questions.length}</strong><span>questions utiles</span></div>
       </div>
 
       ${plan.safetyWarnings.length ? `<div class="safe-order-warnings">${plan.safetyWarnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join('')}</div>` : ''}
@@ -836,7 +883,7 @@ function renderSafeOrderMode(): string {
             <strong>À commander en priorité</strong>
             <span>${plan.bestChoices.length ? 'choix les plus simples' : 'aucun plat vert'}</span>
           </div>
-          ${plan.bestChoices.length ? plan.bestChoices.slice(0, 6).map(renderSafeOrderChoice).join('') : '<p class="muted">Aucun plat n’est assez clair pour être commandé tel quel. Regarde les choix à modifier/vérifier.</p>'}
+          ${plan.bestChoices.length ? plan.bestChoices.slice(0, 3).map(renderSafeOrderChoice).join('') : '<p class="muted">Aucun plat n’est assez clair pour être commandé tel quel. Regarde les choix à modifier/vérifier.</p>'}
         </div>
 
         <div class="safe-order-column safe-order-column--conditional">
@@ -845,7 +892,7 @@ function renderSafeOrderMode(): string {
             <span>modifications et confirmations</span>
           </div>
           ${plan.conditionalChoices.length || plan.unknownChoices.length
-            ? [...plan.conditionalChoices, ...plan.unknownChoices].slice(0, 8).map(renderSafeOrderChoice).join('')
+            ? [...plan.conditionalChoices, ...plan.unknownChoices].slice(0, 4).map(renderSafeOrderChoice).join('')
             : '<p class="muted">Aucun plat orange/inconnu à traiter.</p>'}
         </div>
 
@@ -854,23 +901,16 @@ function renderSafeOrderMode(): string {
             <strong>À éviter</strong>
             <span>risque incompatible</span>
           </div>
-          ${plan.avoidChoices.length ? plan.avoidChoices.slice(0, 8).map(renderSafeOrderChoice).join('') : '<p class="muted">Aucun plat bloqué dans ce scan.</p>'}
+          ${plan.avoidChoices.length ? plan.avoidChoices.slice(0, 4).map(renderSafeOrderChoice).join('') : '<p class="muted">Aucun plat bloqué dans ce scan.</p>'}
         </div>
       </div>
 
       ${plan.modifications.length ? `
-        <details class="safe-order-details" open>
+        <details class="safe-order-details">
           <summary>Modifications les plus utiles à demander</summary>
           <div class="safe-order-mod-list">
             ${plan.modifications.slice(0, 10).map(renderSafeOrderModification).join('')}
           </div>
-        </details>
-      ` : ''}
-
-      ${plan.questions.length ? `
-        <details class="safe-order-details">
-          <summary>Questions consolidées pour le restaurant</summary>
-          <ul class="safe-order-question-list">${plan.questions.slice(0, 12).map((question) => `<li>${escapeHtml(question)}</li>`).join('')}</ul>
         </details>
       ` : ''}
     </section>
@@ -946,7 +986,7 @@ function renderServerAssistantPanel(): string {
 
   if (!plan) {
     return `
-      <section class="card server-assistant-card server-assistant-card--empty">
+      <section class="server-assistant-panel server-assistant-card--empty">
         <div class="card__header card__header--wrap">
           <div>
             <p class="eyebrow">Assistant serveur</p>
@@ -974,16 +1014,15 @@ function renderServerAssistantPanel(): string {
   const statusClass = `status-badge--${summary.provisionalStatus}`;
 
   return `
-    <section class="card server-assistant-card server-assistant-card--v11">
+    <section class="server-assistant-panel server-assistant-card--v11">
       <div class="card__header card__header--wrap">
         <div>
           <p class="eyebrow">Questions prioritaires</p>
           <h2>Assistant serveur · ${escapeHtml(languageName(serverAssistantLanguage))}</h2>
-          <p class="muted">Script prêt à lire, mode urgence, réponses cochables et réanalyse après confirmation serveur.</p>
+          <p class="muted">Lis les questions prioritaires et note les réponses pendant l’échange.</p>
         </div>
         <div class="toolbar">
           <button class="ghost" data-action="copy-server-assistant-main">Copier script</button>
-          <button class="ghost" data-action="copy-server-assistant-compact">Version courte</button>
           <button class="ghost" data-action="speak-server-assistant">Lire à voix haute</button>
         </div>
       </div>
@@ -991,6 +1030,7 @@ function renderServerAssistantPanel(): string {
       <details class="compact-action-drawer">
         <summary>Actions après échange</summary>
         <div class="actions">
+          <button class="ghost" data-action="copy-server-assistant-compact">Copier la version courte</button>
           <button class="ghost" data-action="copy-server-assistant-emergency">Script urgence allergie</button>
           <button class="ghost" data-action="copy-server-answer-sheet">Copier les réponses</button>
           <button class="ghost" data-action="save-server-answer-sheet">Enregistrer les réponses</button>
@@ -998,26 +1038,29 @@ function renderServerAssistantPanel(): string {
         </div>
       </details>
 
-      <div class="server-assistant-controls">
-        <label class="field field--compact">
-          <span>Langue</span>
-          <select id="serverAssistantLanguage">
-            ${renderServerAssistantLanguageOptions()}
-          </select>
-        </label>
-        <label class="field field--compact">
-          <span>Ton</span>
-          <select id="serverAssistantTone">
-            ${renderServerAssistantToneOptions()}
-          </select>
-        </label>
-        <label class="field field--compact">
-          <span>Priorité</span>
-          <select id="serverAssistantUrgency">
-            ${renderServerAssistantUrgencyOptions()}
-          </select>
-        </label>
-      </div>
+      <details class="compact-action-drawer assistant-settings">
+        <summary>Langue et priorité</summary>
+        <div class="server-assistant-controls">
+          <label class="field field--compact">
+            <span>Langue</span>
+            <select id="serverAssistantLanguage">
+              ${renderServerAssistantLanguageOptions()}
+            </select>
+          </label>
+          <label class="field field--compact">
+            <span>Ton</span>
+            <select id="serverAssistantTone">
+              ${renderServerAssistantToneOptions()}
+            </select>
+          </label>
+          <label class="field field--compact">
+            <span>Priorité</span>
+            <select id="serverAssistantUrgency">
+              ${renderServerAssistantUrgencyOptions()}
+            </select>
+          </label>
+        </div>
+      </details>
 
       <div class="server-assistant-summary server-assistant-summary--${summary.provisionalStatus}">
         <div>
@@ -1027,8 +1070,6 @@ function renderServerAssistantPanel(): string {
         </div>
         <div class="server-assistant-counters">
           <span>${summary.answered}/${summary.total} répondues</span>
-          <span>${summary.confirmedSafe} sûres</span>
-          <span>${summary.confirmedRisk + summary.notPossible} risques</span>
           <span>${summary.unknown + summary.unanswered} à clarifier</span>
         </div>
       </div>
@@ -1178,18 +1219,15 @@ function renderRestaurantCockpit(): string {
     ? buildGroupSuggestions(groupRows, 6)
     : buildSingleSuggestions(results, 6);
   const favorites = restaurantMemories.filter((item) => item.favorite).length;
-  const recent = restaurantMemories.filter((item) => item.lastUsedAt).length;
 
   return `
-    <section class="card restaurant-card restaurant-card--v9">
+    <section class="restaurant-panel restaurant-card--v9">
       <div class="card__header card__header--wrap">
         <div>
           <p class="eyebrow">Carnet de restaurants</p>
           <h2>${activeRestaurant ? escapeHtml(activeRestaurant.name) : 'Retrouver un restaurant connu'}</h2>
         </div>
         <div class="toolbar">
-          <button class="ghost" data-action="save-restaurant" ${restaurantDraft.name || activeRestaurant ? '' : 'disabled'}>Sauvegarder fiche</button>
-          <button class="ghost" data-action="restaurant-i-am-here" ${restaurantDraft.name || activeRestaurant ? '' : 'disabled'}>Je suis ici</button>
           <button class="ghost" data-action="copy-order-plan" ${currentRecord ? '' : 'disabled'}>Copier plan de commande</button>
         </div>
       </div>
@@ -1210,31 +1248,26 @@ function renderRestaurantCockpit(): string {
           <span>Recherche restaurant, plat ou note</span>
           <input id="restaurantSearch" type="search" value="${escapeHtml(settings.restaurantSearch)}" placeholder="Ex : tacos, pizza, halal, Aubagne…" />
         </label>
-        <label class="field">
-          <span>Ville/adresse</span>
-          <input id="restaurantCityFilter" type="search" value="${escapeHtml(settings.restaurantCityFilter)}" placeholder="Aubagne, Marseille, centre commercial…" />
-        </label>
-        <label class="field field--small">
-          <span>Tri</span>
-          <select id="restaurantSort">
-            ${renderRestaurantSortOptions()}
-          </select>
-        </label>
-        <label class="toggle toggle--restaurant">
-          <input id="restaurantOnlyFavorites" type="checkbox" ${settings.restaurantOnlyFavorites ? 'checked' : ''} />
-          Favoris seuls
-        </label>
         ${backendConfigured ? '<button class="ghost" data-action="restaurant-remote-search">Chercher en ligne</button>' : ''}
       </div>
 
-      <div class="restaurant-stats-v9">
-        <div><strong>${restaurantMemories.length}</strong><span>fiches locales</span><small>${favorites} favori(s) · ${recent} récent(s)</small></div>
-        ${backendConfigured ? `<div><strong>${restaurantRemoteMatches.length}</strong><span>résultat(s) distant(s)</span><small>service de synchronisation</small></div>` : ''}
-        ${activeInsight ? `
-          <div><strong>${activeInsight.knownDishes.length}</strong><span>plats connus</span><small>${activeInsight.trustedDishCount} source(s) fiable(s)</small></div>
-          <div><strong>${activeInsight.compatibility.safe}</strong><span>plats compatibles</span><small>${activeInsight.compatibility.total ? `${activeInsight.compatibility.safe} sur ${activeInsight.compatibility.total} connus` : 'menu inconnu'}</small></div>
-        ` : ''}
-      </div>
+      <details class="compact-action-drawer restaurant-filters">
+        <summary>Filtres · ${restaurantMemories.length} fiche(s), ${favorites} favori(s)</summary>
+        <div class="restaurant-filter-grid">
+          <label class="field">
+            <span>Ville/adresse</span>
+            <input id="restaurantCityFilter" type="search" value="${escapeHtml(settings.restaurantCityFilter)}" placeholder="Aubagne, Marseille…" />
+          </label>
+          <label class="field field--small">
+            <span>Tri</span>
+            <select id="restaurantSort">${renderRestaurantSortOptions()}</select>
+          </label>
+          <label class="toggle toggle--restaurant">
+            <input id="restaurantOnlyFavorites" type="checkbox" ${settings.restaurantOnlyFavorites ? 'checked' : ''} />
+            Favoris seuls
+          </label>
+        </div>
+      </details>
 
       ${activeInsight ? renderActiveRestaurantDashboard(activeInsight) : `
         <div class="restaurant-empty-dashboard">
@@ -1265,8 +1298,11 @@ function renderRestaurantCockpit(): string {
             <span>Notes restaurant</span>
             <textarea id="restaurantNotes" rows="4" placeholder="Ex : dit halal mais certification à vérifier, sauce blanche lactée, friteuse séparée…">${escapeHtml(restaurantDraft.notes)}</textarea>
           </label>
-          <p class="muted">Les fiches locales et les plats corrigés servent de repères lors des prochaines visites.</p>
           ${orderPlanStatus ? `<p class="sync-status" role="status" aria-live="polite">${escapeHtml(orderPlanStatus)}</p>` : ''}
+          <div class="actions">
+            <button class="primary" data-action="save-restaurant">Sauvegarder la fiche</button>
+            <button class="ghost" data-action="restaurant-i-am-here" ${restaurantDraft.name || activeRestaurant ? '' : 'disabled'}>Utiliser maintenant</button>
+          </div>
           </div>
         </details>
 
@@ -1391,22 +1427,14 @@ function renderCommunityPanel(): string {
   const queuePreview = communityQueue.slice(0, 8);
   const pendingLocal = communityQueue.filter((item) => item.status === 'queued').length;
   const pushedLocal = communityQueue.filter((item) => item.status !== 'queued').length;
+  const activeTab = getCommunityTab();
 
   return `
-    <section class="card community-card">
+    <section class="community-panel">
       <div class="card__header card__header--wrap">
         <div>
           <p class="eyebrow">Contributions</p>
-          <h2>${backendConfigured ? 'Base publique sans profil utilisateur' : 'Préparer des corrections localement'}</h2>
-        </div>
-        <div class="toolbar">
-          ${backendConfigured ? `
-            <button class="ghost" data-action="community-sync">Synchroniser</button>
-            <button class="ghost" data-action="community-fetch-db">Actualiser la base</button>
-          ` : ''}
-          <button class="ghost" data-action="community-import-public-db" ${cachedDishes.length ? '' : 'disabled'}>Importer dans mémoire</button>
-          <button class="ghost" data-action="community-export-github-json">Exporter JSON</button>
-          <button class="ghost danger-action" data-action="community-clear-queue" ${communityQueue.length ? '' : 'disabled'}>Vider la file</button>
+          <h2>${backendConfigured ? 'Base publique sans profil utilisateur' : 'Corrections anonymisées'}</h2>
         </div>
       </div>
 
@@ -1417,38 +1445,56 @@ function renderCommunityPanel(): string {
           : 'Les corrections restent dans ce navigateur jusqu’à un export manuel. Le profil, les allergies personnelles et l’historique ne sont jamais inclus dans cet export.'}</span>
       </div>
 
-      <div class="community-stats">
-        <div><strong>${communityQueue.length}</strong><span>contribution(s) locale(s)</span><small>${pendingLocal} en attente · ${pushedLocal} déjà envoyée(s)</small></div>
-        <div><strong>${cached?.stats.contributions ?? 0}</strong><span>plat(s) dans cache public</span><small>${cached ? new Date(cached.exportedAt).toLocaleString('fr-FR') : 'aucun cache téléchargé'}</small></div>
-        ${backendConfigured ? `<div><strong>${backendHealth?.contributions ?? 0}</strong><span>contribution(s) distante(s)</span><small>${backendHealth?.verifiedContributions ?? 0} vérifiée(s)</small></div>` : ''}
-      </div>
+      <nav class="section-tabs community-tabs" aria-label="Sections communautaires">
+        <a href="#/community/local" class="section-tab ${activeTab === 'local' ? 'section-tab--active' : ''}" ${activeTab === 'local' ? 'aria-current="page"' : ''}>Mes corrections · ${communityQueue.length}</a>
+        <a href="#/community/public" class="section-tab ${activeTab === 'public' ? 'section-tab--active' : ''}" ${activeTab === 'public' ? 'aria-current="page"' : ''}>Base publique · ${cached?.stats.contributions ?? 0}</a>
+      </nav>
+
+      <details class="compact-action-drawer">
+        <summary>Synchronisation et export</summary>
+        <div class="actions">
+          ${backendConfigured ? `
+            <button class="ghost" data-action="community-sync">Synchroniser</button>
+            <button class="ghost" data-action="community-fetch-db">Actualiser la base</button>
+          ` : ''}
+          <button class="ghost" data-action="community-import-public-db" ${cachedDishes.length ? '' : 'disabled'}>Importer dans la mémoire</button>
+          <button class="ghost" data-action="community-export-github-json">Exporter JSON</button>
+          <button class="ghost danger-action" data-action="community-clear-queue" ${communityQueue.length ? '' : 'disabled'}>Vider la file</button>
+        </div>
+      </details>
 
       ${communityStatus ? `<p class="sync-status" role="status" aria-live="polite">${escapeHtml(communityStatus)}</p>` : ''}
 
-      <div class="community-layout">
-        <article class="community-column">
-          <div class="card__header card__header--compact">
-            <div>
-              <p class="eyebrow">File locale</p>
-              <h3>Corrections préparées</h3>
+      <div class="community-content">
+        ${activeTab === 'local' ? `
+          <article class="community-column">
+            <div class="card__header card__header--compact">
+              <div>
+                <p class="eyebrow">File locale</p>
+                <h3>${pendingLocal} en attente · ${pushedLocal} envoyée(s)</h3>
+              </div>
             </div>
-          </div>
-          ${queuePreview.length ? `<div class="community-list">${queuePreview.map(renderCommunityContributionItem).join('')}</div>` : '<p class="muted">Aucune correction préparée. Analyse un plat puis utilise “Préparer le partage”.</p>'}
-        </article>
-
-        <article class="community-column">
-          <div class="card__header card__header--compact">
-            <div>
-              <p class="eyebrow">Base publique en cache</p>
-              <h3>${publicSearchResults.length ? `${publicSearchResults.length} résultat(s)` : 'Aperçu du cache public'}</h3>
+            ${queuePreview.length ? `<div class="community-list">${queuePreview.map(renderCommunityContributionItem).join('')}</div>` : '<p class="muted">Aucune correction préparée. Analyse un plat puis utilise “Préparer le partage”.</p>'}
+          </article>
+        ` : `
+          <article class="community-column">
+            <div class="card__header card__header--compact">
+              <div>
+                <p class="eyebrow">Base publique en cache</p>
+                <h3>${publicSearchResults.length ? `${publicSearchResults.length} résultat(s)` : 'Aperçu du cache public'}</h3>
+              </div>
+              <input id="communitySearch" type="search" value="${escapeHtml(communitySearch)}" placeholder="chercher burger, pizza, restaurant…" />
             </div>
-            <input id="communitySearch" type="search" value="${escapeHtml(communitySearch)}" placeholder="chercher burger, pizza, restaurant…" />
-          </div>
-          ${preview.length ? `<div class="community-list">${preview.map(renderCommunityContributionItem).join('')}</div>` : `<p class="muted">${backendConfigured ? 'Actualise la base publique pour afficher les plats validés.' : 'Aucune base publique n’est embarquée. Les corrections locales peuvent être exportées en JSON.'}</p>`}
-        </article>
+            ${preview.length ? `<div class="community-list">${preview.map(renderCommunityContributionItem).join('')}</div>` : `<p class="muted">${backendConfigured ? 'Actualise la base publique pour afficher les plats validés.' : 'Aucune base publique n’est disponible sur cet appareil.'}</p>`}
+          </article>
+        `}
       </div>
     </section>
   `;
+}
+
+function getCommunityTab(): 'local' | 'public' {
+  return window.location.hash.replace(/^#\/?/, '').split('/')[1] === 'public' ? 'public' : 'local';
 }
 
 function renderCommunityContributionItem(item: PublicDishContribution): string {
@@ -1689,12 +1735,19 @@ function renderGroupProfilePicker(): string {
   `;
 }
 
-function renderCheckbox(kind: 'rule' | 'allergen' | 'intolerance', value: string, label: string, checked: boolean, hint: string): string {
+function renderCheckbox(
+  kind: 'rule' | 'allergen' | 'intolerance',
+  value: string,
+  label: string,
+  checked: boolean,
+  hint: string,
+  showHint = true,
+): string {
   return `
     <label class="check-card" title="${escapeHtml(hint)}">
       <input type="checkbox" data-kind="${kind}" value="${escapeHtml(value)}" ${checked ? 'checked' : ''} />
       <span>${escapeHtml(label)}</span>
-      <small>${escapeHtml(hint)}</small>
+      ${showHint ? `<small>${escapeHtml(hint)}</small>` : ''}
     </label>
   `;
 }
@@ -1823,50 +1876,46 @@ function renderSelectedIngredient(ingredient: Ingredient): string {
 function renderResultCard(result: AnalysisResult): string {
   const ingredients = result.matchedDish.ingredients;
   const lookup = offLookups[result.menuItem.id];
+  const primaryReason = result.reasons[0]?.message ?? 'Aucun risque particulier détecté.';
 
   return `
-    <article class="result result--${result.status}">
-      <div class="result__top">
+    <details class="result result--${result.status}">
+      <summary class="result-summary-row">
         <div>
           <span class="status-badge status-badge--${result.status}">${statusLabel(result.status)}</span>
           <h3>${escapeHtml(result.menuItem.rawName)} ${result.menuItem.price ? `<em>${escapeHtml(result.menuItem.price)}</em>` : ''}</h3>
           ${result.menuItem.section ? `<span class="section-pill">${escapeHtml(result.menuItem.section)}</span>` : ''}
-          ${result.menuItem.description ? `<p class="muted">${escapeHtml(result.menuItem.description)}</p>` : ''}
+          <p>${escapeHtml(primaryReason)}</p>
         </div>
         <div class="confidence"><strong>${confidenceLabel(result.confidence)}</strong><small>niveau de confiance</small></div>
-      </div>
+      </summary>
 
-      <div class="result__meta">
-        <span>Match : ${escapeHtml(result.matchedDish.matchedBy)}</span>
-        <span>Confiance : ${confidenceLabel(result.confidence)}</span>
-      </div>
-
-      <div class="ingredient-strip">
-        ${renderIngredientBadges(ingredients)}
-      </div>
-
-      ${result.matchedDish.sourceNotes?.length ? `<div class="source-notes">${result.matchedDish.sourceNotes.map((note) => `<span>${escapeHtml(note)}</span>`).join('')}</div>` : ''}
-
-      <ul class="reason-list">
-        ${result.reasons.map((reason) => `<li class="reason reason--${reason.severity}">${escapeHtml(reason.message)}</li>`).join('')}
-      </ul>
-
-      ${result.askServerQuestions.length ? `
-        <details class="questions">
-          <summary>Questions à poser au restaurant</summary>
-          <ul>${result.askServerQuestions.map((question) => `<li>${escapeHtml(question)}</li>`).join('')}</ul>
+      <div class="result__body">
+        ${result.menuItem.description ? `<p class="muted">${escapeHtml(result.menuItem.description)}</p>` : ''}
+        <div class="result__meta"><span>Correspondance : ${escapeHtml(result.matchedDish.matchedBy)}</span></div>
+        <div class="ingredient-strip">${renderIngredientBadges(ingredients)}</div>
+        ${result.matchedDish.sourceNotes?.length ? `<div class="source-notes">${result.matchedDish.sourceNotes.map((note) => `<span>${escapeHtml(note)}</span>`).join('')}</div>` : ''}
+        <ul class="reason-list">
+          ${result.reasons.map((reason) => `<li class="reason reason--${reason.severity}">${escapeHtml(reason.message)}</li>`).join('')}
+        </ul>
+        ${result.askServerQuestions.length ? `
+          <details class="questions">
+            <summary>Questions à poser au restaurant</summary>
+            <ul>${result.askServerQuestions.map((question) => `<li>${escapeHtml(question)}</li>`).join('')}</ul>
+          </details>
+        ` : ''}
+        ${lookup ? `<div class="lookup-box">${lookup}</div>` : ''}
+        <details class="compact-action-drawer result-actions-drawer">
+          <summary>Corriger, partager ou chercher une source</summary>
+          <div class="actions">
+            <button class="ghost" data-action="learn-dish" data-item-id="${result.menuItem.id}">Corriger / apprendre</button>
+            <button class="ghost" data-action="share-dish-public" data-item-id="${result.menuItem.id}">Préparer le partage</button>
+            <button class="ghost" data-action="off-lookup" data-item-id="${result.menuItem.id}">Chercher source produit</button>
+            <button class="ghost" data-action="copy-questions" data-item-id="${result.menuItem.id}">Copier les questions</button>
+          </div>
         </details>
-      ` : ''}
-
-      ${lookup ? `<div class="lookup-box">${lookup}</div>` : ''}
-
-      <div class="result__actions">
-        <button class="ghost" data-action="learn-dish" data-item-id="${result.menuItem.id}">Corriger / apprendre</button>
-        <button class="ghost" data-action="share-dish-public" data-item-id="${result.menuItem.id}">Préparer le partage</button>
-        <button class="ghost" data-action="off-lookup" data-item-id="${result.menuItem.id}">Chercher source produit</button>
-        <button class="ghost" data-action="copy-questions" data-item-id="${result.menuItem.id}">Copier questions</button>
       </div>
-    </article>
+    </details>
   `;
 }
 
@@ -1874,13 +1923,13 @@ function renderGroupRowCard(row: GroupAnalysisRow): string {
   const questions = uniqueStrings(row.results.flatMap((result) => result.askServerQuestions));
   const ingredients = row.results[0]?.matchedDish.ingredients ?? [];
   return `
-    <article class="result group-row result--${row.aggregateStatus}">
-      <div class="result__top">
+    <details class="result group-row result--${row.aggregateStatus}">
+      <summary class="result-summary-row">
         <div>
           <span class="status-badge status-badge--${row.aggregateStatus}">${groupStatusLabel(row)}</span>
           <h3>${escapeHtml(row.menuItem.rawName)} ${row.menuItem.price ? `<em>${escapeHtml(row.menuItem.price)}</em>` : ''}</h3>
           ${row.menuItem.section ? `<span class="section-pill">${escapeHtml(row.menuItem.section)}</span>` : ''}
-          ${row.menuItem.description ? `<p class="muted">${escapeHtml(row.menuItem.description)}</p>` : ''}
+          <p>${escapeHtml(row.menuItem.description || `${row.safeCount} profil(s) compatible(s), ${row.cautionCount + row.unknownCount} à vérifier.`)}</p>
         </div>
         <div class="mini-stats">
           <span class="dot dot--safe">${row.safeCount}</span>
@@ -1888,23 +1937,26 @@ function renderGroupRowCard(row: GroupAnalysisRow): string {
           <span class="dot dot--blocked">${row.blockedCount}</span>
           <span class="dot dot--unknown">${row.unknownCount}</span>
         </div>
-      </div>
-      <div class="ingredient-strip">${renderIngredientBadges(ingredients)}</div>
-      <div class="profile-result-grid">
-        ${row.results.map(renderProfileDecision).join('')}
-      </div>
-      ${questions.length ? `
-        <details class="questions">
-          <summary>Questions groupe à poser au restaurant</summary>
-          <ul>${questions.map((question) => `<li>${escapeHtml(question)}</li>`).join('')}</ul>
+      </summary>
+      <div class="result__body">
+        <div class="ingredient-strip">${renderIngredientBadges(ingredients)}</div>
+        <div class="profile-result-grid">${row.results.map(renderProfileDecision).join('')}</div>
+        ${questions.length ? `
+          <details class="questions">
+            <summary>Questions groupe à poser au restaurant</summary>
+            <ul>${questions.map((question) => `<li>${escapeHtml(question)}</li>`).join('')}</ul>
+          </details>
+        ` : ''}
+        <details class="compact-action-drawer result-actions-drawer">
+          <summary>Corriger ou partager ce plat</summary>
+          <div class="actions">
+            <button class="ghost" data-action="learn-dish" data-item-id="${row.menuItem.id}">Corriger / apprendre</button>
+            <button class="ghost" data-action="share-dish-public" data-item-id="${row.menuItem.id}">Préparer le partage</button>
+            <button class="ghost" data-action="copy-group-questions" data-item-id="${row.menuItem.id}">Copier les questions groupe</button>
+          </div>
         </details>
-      ` : ''}
-      <div class="result__actions">
-        <button class="ghost" data-action="learn-dish" data-item-id="${row.menuItem.id}">Corriger / apprendre</button>
-        <button class="ghost" data-action="share-dish-public" data-item-id="${row.menuItem.id}">Préparer le partage</button>
-        <button class="ghost" data-action="copy-group-questions" data-item-id="${row.menuItem.id}">Copier questions groupe</button>
       </div>
-    </article>
+    </details>
   `;
 }
 
@@ -2297,8 +2349,19 @@ function clearLearningIngredients() {
 function reanalyzeCurrentState() {
   if (results.length === 0 && groupRows.length === 0) return;
   const items = parseMenuText(menuText);
-  results = analyzeMenuItems(items, getActiveProfile());
-  groupRows = analyzeMenuForGroup(items, getEnabledProfiles());
+  const activeProfile = getActiveProfile();
+  const enabledProfiles = getEnabledProfiles();
+  results = analyzeMenuItems(items, activeProfile);
+  groupRows = analyzeMenuForGroup(items, enabledProfiles);
+  if (currentRecord) {
+    currentRecord = {
+      ...currentRecord,
+      profile: activeProfile,
+      profiles: enabledProfiles,
+      results,
+      groupRows: settings.mode === 'group' ? groupRows : undefined,
+    };
+  }
 }
 
 function buildInitialLearningNotes(result: AnalysisResult): string {
@@ -2585,20 +2648,11 @@ async function copyCurrentOrderPlan(button: HTMLElement) {
   orderPlanStatus = 'Plan de commande copié dans le presse-papiers.';
 }
 
-async function copySafeOrderText(button: HTMLElement, kind: 'plan' | 'script' | 'questions' | 'avoid') {
+async function copySafeOrderPlan(button: HTMLElement) {
   const plan = getCurrentSafeOrderPlan();
   if (!plan) return;
-
-  const text = kind === 'script'
-    ? plan.serverScript
-    : kind === 'questions'
-      ? (plan.questions.join('\n') || 'Aucune question prioritaire.')
-      : kind === 'avoid'
-        ? (plan.avoidChoices.map((choice) => `- ${choice.itemName} : ${choice.blockers.slice(0, 2).join(' ; ') || 'incompatible avec le profil'}`).join('\n') || 'Aucun plat à éviter dans ce scan.')
-        : plan.shortText;
-
-  await navigator.clipboard.writeText(text);
-  button.textContent = kind === 'script' ? 'Script copié' : kind === 'questions' ? 'Questions copiées' : kind === 'avoid' ? 'Liste copiée' : 'Plan sûr copié';
+  await navigator.clipboard.writeText(plan.shortText);
+  button.textContent = 'Plan sûr copié';
   orderPlanStatus = 'Plan de commande copié dans le presse-papiers.';
 }
 
@@ -2802,7 +2856,6 @@ function searchCommunityCache(query: string) {
   const normalized = normalizeText(query);
   if (!normalized || !publicDbCache) {
     publicSearchResults = [];
-    render();
     return;
   }
   publicSearchResults = publicDbCache.dishes.filter((item) => normalizeText([
@@ -2812,7 +2865,6 @@ function searchCommunityCache(query: string) {
     item.ingredientIds.join(' '),
     item.aliases.join(' '),
   ].filter(Boolean).join(' ')).includes(normalized)).slice(0, 40);
-  render();
 }
 
 
@@ -2987,6 +3039,7 @@ function getActiveProfile(): UserProfile {
 }
 
 function getEnabledProfiles(): UserProfile[] {
+  if (settings.mode === 'single') return [getActiveProfile()];
   const selected = profiles.filter((profile) => settings.enabledProfileIds.includes(profile.id ?? ''));
   return selected.length ? selected : [getActiveProfile()];
 }
@@ -3044,6 +3097,38 @@ function syncMenuTextFromDom() {
   menuText = textarea?.value ?? menuText;
 }
 
+function renderPreservingInput(
+  target: HTMLInputElement | HTMLTextAreaElement,
+  openDetailsSelector = '',
+): void {
+  const inputId = target.id;
+  const selectionStart = target.selectionStart;
+  const selectionEnd = target.selectionEnd;
+  render();
+
+  if (openDetailsSelector) {
+    const drawer = document.querySelector<HTMLDetailsElement>(openDetailsSelector);
+    if (drawer) drawer.open = true;
+  }
+
+  const replacement = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(`#${inputId}`);
+  if (!replacement) return;
+  replacement.focus({ preventScroll: true });
+  if (selectionStart !== null && selectionEnd !== null) {
+    replacement.setSelectionRange(selectionStart, selectionEnd);
+  }
+}
+
+function enforceExclusiveDietRule(target: HTMLInputElement | HTMLSelectElement): void {
+  if (!(target instanceof HTMLInputElement) || target.dataset.kind !== 'rule' || !target.checked) return;
+  const exclusiveRules: RuleId[] = ['vegetarian', 'vegan', 'pescetarian'];
+  if (!exclusiveRules.includes(target.value as RuleId)) return;
+
+  for (const input of document.querySelectorAll<HTMLInputElement>('input[data-kind="rule"]')) {
+    if (input !== target && exclusiveRules.includes(input.value as RuleId)) input.checked = false;
+  }
+}
+
 function resetTranslationState(status = '') {
   translationReport = null;
   translationStatus = status;
@@ -3071,6 +3156,29 @@ app.addEventListener('click', async (event) => {
   if (!button) return;
 
   const action = button.dataset.action;
+
+  if (action === 'onboarding-next') {
+    syncActiveProfileFromDom();
+    onboardingStep = Math.min(3, onboardingStep + 1);
+    render();
+    return;
+  }
+
+  if (action === 'onboarding-back') {
+    syncActiveProfileFromDom();
+    onboardingStep = Math.max(0, onboardingStep - 1);
+    render();
+    return;
+  }
+
+  if (action === 'onboarding-skip' || action === 'onboarding-finish') {
+    syncActiveProfileFromDom();
+    completeOnboarding();
+    onboardingRequired = false;
+    onboardingStep = 0;
+    navigateToView('scanner');
+    return;
+  }
 
   if (action === 'sample') {
     const sample = SAMPLE_MENUS.find((item) => item.id === button.dataset.sampleId);
@@ -3257,6 +3365,29 @@ app.addEventListener('click', async (event) => {
     return;
   }
 
+  if (action === 'new-profile') {
+    syncActiveProfileFromDom();
+    const profileId = `profile-${Date.now()}`;
+    const profile: UserProfile = {
+      ...DEFAULT_PROFILE,
+      id: profileId,
+      name: 'Nouveau profil',
+      rules: [],
+      allergens: [],
+      intolerances: [],
+      customForbiddenTerms: [],
+      customCautionTerms: [],
+    };
+    profiles = [profile, ...profiles];
+    settings.activeProfileId = profileId;
+    settings.enabledProfileIds = uniqueStrings([...settings.enabledProfileIds, profileId]);
+    saveProfiles(profiles);
+    persistSettings();
+    reanalyzeCurrentState();
+    render();
+    return;
+  }
+
   if (action === 'duplicate-profile') {
     syncActiveProfileFromDom();
     const active = getActiveProfile();
@@ -3271,6 +3402,7 @@ app.addEventListener('click', async (event) => {
     settings.enabledProfileIds = uniqueStrings([...(settings.enabledProfileIds ?? []), copy.id ?? '']);
     saveProfiles(profiles);
     persistSettings();
+    reanalyzeCurrentState();
     render();
     return;
   }
@@ -3285,6 +3417,7 @@ app.addEventListener('click', async (event) => {
     if (settings.enabledProfileIds.length === 0 && profiles[0]?.id) settings.enabledProfileIds = [profiles[0].id];
     saveProfiles(profiles);
     persistSettings();
+    reanalyzeCurrentState();
     render();
     return;
   }
@@ -3299,6 +3432,14 @@ app.addEventListener('click', async (event) => {
     serverAnswers = {};
     serverAssistantStatus = '';
     render();
+    return;
+  }
+
+  if (action === 'clear-all-local-data') {
+    if (!confirmDestructive('Effacer définitivement les profils, scans, restaurants, corrections et caches de cette app ?')) return;
+    clearAllLocalData();
+    window.location.hash = '#/scanner';
+    window.location.reload();
     return;
   }
 
@@ -3422,22 +3563,7 @@ app.addEventListener('click', async (event) => {
   }
 
   if (action === 'copy-safe-order-plan') {
-    await copySafeOrderText(button, 'plan');
-    return;
-  }
-
-  if (action === 'copy-safe-order-script') {
-    await copySafeOrderText(button, 'script');
-    return;
-  }
-
-  if (action === 'copy-safe-order-questions') {
-    await copySafeOrderText(button, 'questions');
-    return;
-  }
-
-  if (action === 'copy-safe-order-avoid') {
-    await copySafeOrderText(button, 'avoid');
+    await copySafeOrderPlan(button);
     return;
   }
 
@@ -3475,17 +3601,6 @@ app.addEventListener('click', async (event) => {
     if (!confirmDestructive('Effacer toutes les réponses notées pour cet échange ?')) return;
     serverAnswers = {};
     serverAssistantStatus = 'Réponses serveur réinitialisées.';
-    render();
-    return;
-  }
-
-  if (action === 'server-answer') {
-    const questionId = button.dataset.questionId;
-    const answer = button.dataset.answer as ServerAnswerValue | undefined;
-    if (!questionId || !answer) return;
-    if (answer === 'unanswered') delete serverAnswers[questionId];
-    else serverAnswers[questionId] = answer;
-    serverAssistantStatus = `Réponse serveur notée : ${answerValueLabel(answer)}.`;
     render();
     return;
   }
@@ -3826,6 +3941,7 @@ app.addEventListener('change', async (event) => {
   if (target.id === 'activeProfileId' && target instanceof HTMLSelectElement) {
     settings.activeProfileId = target.value;
     persistSettings();
+    reanalyzeCurrentState();
     render();
     return;
   }
@@ -3842,6 +3958,7 @@ app.addEventListener('change', async (event) => {
   }
 
   if (target.matches('input[data-kind], #strictness')) {
+    enforceExclusiveDietRule(target);
     syncActiveProfileFromDom();
     if (results.length > 0 || groupRows.length > 0) {
       const items = parseMenuText(menuText);
@@ -3857,26 +3974,27 @@ app.addEventListener('input', (event) => {
 
   if (target.id === 'communitySearch') {
     searchCommunityCache(target.value);
+    renderPreservingInput(target);
     return;
   }
 
   if (target.id === 'moderationSearch') {
     moderationSearch = target.value;
-    render();
+    renderPreservingInput(target, '.moderation-drawer');
     return;
   }
 
   if (target.id === 'restaurantSearch') {
     settings.restaurantSearch = target.value;
     persistSettings();
-    render();
+    renderPreservingInput(target);
     return;
   }
 
   if (target.id === 'restaurantCityFilter') {
     settings.restaurantCityFilter = target.value;
     persistSettings();
-    render();
+    renderPreservingInput(target, '.restaurant-filters');
     return;
   }
 
@@ -3945,5 +4063,6 @@ window.addEventListener('hashchange', () => {
   render();
 });
 
+reanalyzeCurrentState();
 render();
 if (backendConfigured) void refreshBackendStatus(true);

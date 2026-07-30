@@ -46,4 +46,17 @@ describe('menu compatibility engine', () => {
     expect(result.status).toBe('blocked');
     expect(result.askServerQuestions.join(' ')).toContain('arachides');
   });
+
+  it('always applies custom forbidden terms without a separate rule switch', () => {
+    const items = parseMenuText('Pizza spéciale truffe - 12€');
+    const [result] = analyzeMenuItems(items, {
+      ...peanutAllergy,
+      id: 'test-custom',
+      allergens: [],
+      strictness: 'normal',
+      customForbiddenTerms: ['truffe'],
+    });
+    expect(result.status).toBe('blocked');
+    expect(result.reasons.some((reason) => reason.rule === 'custom')).toBe(true);
+  });
 });

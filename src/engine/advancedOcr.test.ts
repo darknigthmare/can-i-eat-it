@@ -23,6 +23,15 @@ describe('advanced OCR helpers', () => {
     expect(report.qualityScore).toBeGreaterThan(40);
   });
 
+  it('does not treat dish names as section headings', () => {
+    const text = 'Burgers\nBurger boeuf cheddar 9,90€\nBurger vegan crispy 9,40€\nTacos\nTacos poulet 10,50€';
+    const report = buildOcrAdvancedReport(text, parseMenuText(text));
+    expect(report.sectionCount).toBe(2);
+    expect(report.sections.map((section) => section.title)).toEqual(['Burgers', 'Tacos']);
+    expect(report.sections.map((section) => section.itemCount)).toEqual([2, 1]);
+    expect(report.sections.every((section) => section.lineEnd >= section.lineStart)).toBe(true);
+  });
+
   it('creates and merges a zone draft without duplicating existing lines', () => {
     const text = 'Pizzas\nPizza reine 11,50€';
     const report = buildOcrAdvancedReport(text, parseMenuText(text));

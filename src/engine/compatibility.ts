@@ -316,8 +316,6 @@ function addDietaryReasons(profile: UserProfile, tags: Set<IngredientTag>, ingre
 }
 
 function addCustomReasons(profile: UserProfile, normalizedText: string, reasons: DecisionReason[]) {
-  if (!profile.rules.includes('custom_strict')) return;
-
   const forbiddenHits = includesAny(normalizedText, profile.customForbiddenTerms);
   for (const hit of forbiddenHits) {
     reasons.push({

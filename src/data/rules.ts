@@ -13,7 +13,6 @@ export const RULE_LABELS: Record<RuleId, string> = {
   hindu_no_beef: 'Hindou : sans bœuf',
   low_lactose: 'Faible lactose',
   gluten_free: 'Sans gluten',
-  custom_strict: 'Règles personnelles strictes',
 };
 
 export const RULE_DESCRIPTIONS: Record<RuleId, string> = {
@@ -29,7 +28,6 @@ export const RULE_DESCRIPTIONS: Record<RuleId, string> = {
   hindu_no_beef: 'Bloque bœuf/veau et met en alerte bouillons ou graisses animales inconnues.',
   low_lactose: 'Alerte lait, crème, fromage, beurre, yaourt et sauces lactées.',
   gluten_free: 'Alerte blé/farine/pain/pâte/panure/couscous et contamination de friture.',
-  custom_strict: 'Applique les termes interdits et termes à vérifier ajoutés par l’utilisateur.',
 };
 
 export const STRICTNESS_LABELS: Record<Strictness, string> = {
@@ -39,14 +37,14 @@ export const STRICTNESS_LABELS: Record<Strictness, string> = {
 };
 
 export const DEFAULT_PROFILE: UserProfile = {
-  id: 'profile-halal-veg-lactose',
-  name: 'Moi · végétarien halal lactose',
-  rules: ['vegetarian', 'halal', 'no_alcohol', 'low_lactose'],
+  id: 'profile-default',
+  name: 'Mon profil',
+  rules: [],
   allergens: [],
-  intolerances: ['milk'],
+  intolerances: [],
   strictness: 'normal',
-  customForbiddenTerms: ['porc', 'jambon', 'bacon', 'alcool'],
-  customCautionTerms: ['sauce maison', 'bouillon', 'gélatine', 'fromage', 'crème'],
+  customForbiddenTerms: [],
+  customCautionTerms: [],
   enabled: true,
-  color: '#74f7b0',
+  color: '#10a37f',
 };
